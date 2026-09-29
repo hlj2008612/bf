@@ -1,35 +1,25 @@
-// ================================================================
-//  渲染逻辑
-// ================================================================
 import { state, setCanvas } from './state.js';
 import { WORLD_COLS, WORLD_ROWS, TOTAL_IMAGES, STEP, EPSILON } from './config.js';
 import { mod } from './utils.js';
 
-// ================================================================
-//  1. 尺寸缓存（根据图片比例动态生成）
-// ================================================================
+// 卡片尺寸缓存
 const sizeCache = [];
 
-/**
- * 异步加载所有图片的宽高比，并生成尺寸缓存
- */
+// 异步加载所有图片，获取宽高比，计算卡片尺寸
 async function initSizeCache() {
     const aspectRatios = {};
     const promises = [];
 
-    // 1. 并发加载所有图片，获取真实宽高比
     for (let i = 1; i <= TOTAL_IMAGES; i++) {
         const img = new Image();
-        // 在 Vite 中，public 目录下的文件可以直接用 / 访问
         img.src = `/images/thumbnails/${i}.webp`;
         const promise = new Promise((resolve) => {
             img.onload = () => {
-                const ratio = img.naturalWidth / img.naturalHeight;
-                aspectRatios[i] = ratio;
+                aspectRatios[i] = img.naturalWidth / img.naturalHeight;
                 resolve();
             };
             img.onerror = () => {
-                aspectRatios[i] = 1; // 图片加载失败时默认方形
+                aspectRatios[i] = 1;
                 resolve();
             };
         });
@@ -38,42 +28,32 @@ async function initSizeCache() {
 
     await Promise.all(promises);
 
-    // 2. 根据宽高比生成 sizeCache
     for (let gx = 0; gx < WORLD_COLS; gx++) {
         sizeCache[gx] = [];
         for (let gy = 0; gy < WORLD_ROWS; gy++) {
             const imgIdx = ((gx * 47 + gy * 31) % TOTAL_IMAGES + TOTAL_IMAGES) % TOTAL_IMAGES + 1;
             const ratio = aspectRatios[imgIdx] || 1;
 
-            // 基础面积：保持卡片总面积大致不变
             const baseArea = 180 * 180;
             let w = Math.sqrt(baseArea * ratio);
             let h = Math.sqrt(baseArea / ratio);
 
-            // 限制在 CARD_SIZE_MIN ~ CARD_SIZE_MAX 之间
-            const min = 140;
-            const max = 210;
+            const min = 140; const max = 210;
             if (w > max) { w = max; h = w / ratio; }
             if (h > max) { h = max; w = h * ratio; }
             if (w < min) { w = min; h = w / ratio; }
             if (h < min) { h = min; w = h * ratio; }
 
-            sizeCache[gx][gy] = {
-                w: Math.round(w),
-                h: Math.round(h)
-            };
+            sizeCache[gx][gy] = { w: Math.round(w), h: Math.round(h) };
         }
     }
 }
 
-// ================================================================
-//  2. 预创建所有卡片 DOM
-// ================================================================
 const allCards = [];
 
-// 导出 buildCards 供 main.js 调用
+// 构建所有卡片 DOM
 export async function buildCards(canvasEl) {
-    setCanvas(canvasEl); // 确保 state 里有 canvas
+    setCanvas(canvasEl);
     await initSizeCache();
 
     for (let col = 0; col < WORLD_COLS; col++) {
@@ -85,24 +65,19 @@ export async function buildCards(canvasEl) {
             img.src = `/images/thumbnails/${imgIdx}.webp`;
             img.decoding = 'async';
             img.loading = 'lazy';
-            img.alt = '';
             card.appendChild(img);
             canvasEl.appendChild(card);
             allCards.push({
-                el: card,
-                col: col,
-                row: row,
+                el: card, col, row,
                 baseW: sizeCache[col][row].w,
                 baseH: sizeCache[col][row].h,
-                imgIdx: imgIdx,
+                imgIdx
             });
         }
     }
 }
 
-// ================================================================
-//  3. 核心渲染函数（更新卡片位置、缩放、可见性、模糊）
-// ================================================================
+// 核心渲染函数
 export function updateRender() {
     const dynamicScale = Math.min(1.4, Math.max(0.5, Math.min(state.viewW / 1400, state.viewH / 900)));
     const currentStep = STEP * dynamicScale;
@@ -117,14 +92,11 @@ export function updateRender() {
     const colsNeeded = Math.ceil(state.viewW / currentStep) + buffer * 2;
     const rowsNeeded = Math.ceil(state.viewH / currentStep) + buffer * 2;
 
+    // 视口虚拟化：只计算可见范围
     const visibleSet = new Set();
     for (let i = 0; i < colsNeeded; i++) {
         for (let j = 0; j < rowsNeeded; j++) {
-            const gridX = startCol + i;
-            const gridY = startRow + j;
-            const worldCol = mod(gridX, WORLD_COLS);
-            const worldRow = mod(gridY, WORLD_ROWS);
-            visibleSet.add(`${worldCol},${worldRow}`);
+            visibleSet.add(`${mod(startCol + i, WORLD_COLS)},${mod(startRow + j, WORLD_ROWS)}`);
         }
     }
 
@@ -134,43 +106,32 @@ export function updateRender() {
             continue;
         }
 
-        const targetScreenX = centerX;
-        const targetScreenY = centerY;
-
+        // 无缝无限滚动：找距离屏幕中心最近的网格坐标
         let bestGridX = null, bestGridY = null;
         let bestDist = Infinity, bestDistY = Infinity;
-
         for (let k = -2; k <= 2; k++) {
-            const candidateGridX = card.col + k * WORLD_COLS;
-            const cellX = candidateGridX * currentStep + state.scrollX;
-            const dist = Math.abs(cellX + currentStep / 2 - targetScreenX);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestGridX = candidateGridX;
+            const cellX = (card.col + k * WORLD_COLS) * currentStep + state.scrollX;
+            if (Math.abs(cellX + currentStep / 2 - centerX) < bestDist) { 
+                bestDist = Math.abs(cellX + currentStep / 2 - centerX); 
+                bestGridX = card.col + k * WORLD_COLS; 
             }
         }
         for (let k = -2; k <= 2; k++) {
-            const candidateGridY = card.row + k * WORLD_ROWS;
-            const cellY = candidateGridY * currentStep + state.scrollY;
-            const dist = Math.abs(cellY + currentStep / 2 - targetScreenY);
-            if (dist < bestDistY) {
-                bestDistY = dist;
-                bestGridY = candidateGridY;
+            const cellY = (card.row + k * WORLD_ROWS) * currentStep + state.scrollY;
+            if (Math.abs(cellY + currentStep / 2 - centerY) < bestDistY) { 
+                bestDistY = Math.abs(cellY + currentStep / 2 - centerY); 
+                bestGridY = card.row + k * WORLD_ROWS; 
             }
         }
 
-        const gridX = bestGridX;
-        const gridY = bestGridY;
-        const cellX = gridX * currentStep + state.scrollX;
-        const cellY = gridY * currentStep + state.scrollY;
-
-        const baseW = card.baseW;
-        const baseH = card.baseH;
-        const scaledW = Math.round(baseW * dynamicScale);
-        const scaledH = Math.round(baseH * dynamicScale);
+        const cellX = bestGridX * currentStep + state.scrollX;
+        const cellY = bestGridY * currentStep + state.scrollY;
+        const scaledW = Math.round(card.baseW * dynamicScale);
+        const scaledH = Math.round(card.baseH * dynamicScale);
         const posX = Math.round(cellX + (currentStep - scaledW) / 2);
         const posY = Math.round(cellY + (currentStep - scaledH) / 2);
 
+        // 二次屏幕外剔除
         if (posX + scaledW < -margin || posX > state.viewW + margin ||
             posY + scaledH < -margin || posY > state.viewH + margin) {
             card.el.style.display = 'none';
@@ -183,13 +144,10 @@ export function updateRender() {
         card.el.style.left = posX + 'px';
         card.el.style.top = posY + 'px';
 
-        const cardCenterX = posX + scaledW / 2;
-        const cardCenterY = posY + scaledH / 2;
-        const dist = Math.hypot(cardCenterX - centerX, cardCenterY - centerY);
+        // 中心放大镜效果
+        const dist = Math.hypot(posX + scaledW / 2 - centerX, posY + scaledH / 2 - centerY);
         const scale = 0.6 + ((maxDist - dist) / maxDist) * 1.2;
-        const zIndex = Math.round(10000 - dist * 10);
-
         card.el.style.transform = `scale(${scale.toFixed(3)})`;
-        card.el.style.zIndex = zIndex;
+        card.el.style.zIndex = Math.round(10000 - dist * 10);
     }
 }

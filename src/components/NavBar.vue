@@ -1,8 +1,9 @@
 <template>
   <nav class="glass-nav" @mousedown.stop @wheel.stop>
     <div class="nav-left">
-      <span class="logo">✦ 美琴の写真館</span>
+      <span class="logo">✦ 美琴子 ✦</span>
       <div class="nav-items">
+        <!-- 半透明高亮胶囊，根据 active 元素动态计算位置 -->
         <div class="active-pill" :style="pillStyle"></div>
         <a v-for="item in navItems" :key="item.path"
            href="#" 
@@ -22,7 +23,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, watch } from 'vue';
+import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 
 const emit = defineEmits(['navigate']);
@@ -39,6 +40,7 @@ const navItems = [
   { name: '音乐', path: '/music', title: 'MUSIC', color: '#eb418d' }
 ];
 
+// 计算胶囊宽度和位置
 const updatePill = () => {
   const activeEl = document.querySelector('.nav-link.active');
   if (activeEl) {
@@ -49,11 +51,15 @@ const updatePill = () => {
   }
 };
 
-// 监听路由变化：只有路由真的变了，才更新导航状态和胶囊位置
-watch(() => route.path, (newPath) => {
-  currentPath.value = newPath;
-  setTimeout(updatePill, 100); // 等待 DOM 更新后移动胶囊
-});
+// 监听路由变化，校准 active 状态
+watch(
+  () => route.path,
+  async (newPath) => {
+    currentPath.value = newPath;
+    await nextTick();
+    updatePill();
+  }
+);
 
 onMounted(() => {
   updatePill();
@@ -64,10 +70,13 @@ onUnmounted(() => {
   window.removeEventListener('resize', updatePill);
 });
 
-// 核心修改：点击时只发出事件，不在这里更新状态
-const handleNavigate = (item) => {
+// 点击瞬间立即移动胶囊，然后才触发转场
+const handleNavigate = async (item) => {
   if (currentPath.value === item.path) return;
-  emit('navigate', item); 
+  currentPath.value = item.path;
+  await nextTick();
+  updatePill();
+  emit('navigate', item);
 };
 
 const logout = () => {
@@ -77,15 +86,45 @@ const logout = () => {
 </script>
 
 <style scoped>
-/* 样式保持不变 */
-.glass-nav { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); width: 90%; max-width: 1200px; height: 60px; background: rgba(15, 15, 25, 0.6); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 30px; display: flex; justify-content: space-between; align-items: center; padding: 0 24px; z-index: 99999; box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 10px rgba(74, 158, 255, 0.2); }
+.glass-nav {
+  position: fixed; top: 20px; left: 50%;
+  transform: translateX(-50%);
+  width: 90%; max-width: 1200px; height: 60px;
+  background: rgba(15, 15, 25, 0.6);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 30px;
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 0 24px; z-index: 99999;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 10px rgba(74, 158, 255, 0.2);
+}
 .nav-left { display: flex; align-items: center; gap: 24px; }
-.logo { font-weight: bold; font-size: 18px; letter-spacing: 1px; background: linear-gradient(90deg, #4a9eff, #a855f7); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+.logo {
+  font-weight: bold; font-size: 18px; letter-spacing: 1px;
+  background: linear-gradient(90deg, #4a9eff, #a855f7);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
 .nav-items { position: relative; display: flex; gap: 8px; }
-.nav-link { position: relative; z-index: 2; color: #a0a0a0; text-decoration: none; font-size: 15px; padding: 8px 16px; border-radius: 20px; transition: all 0.3s; cursor: pointer; }
-.nav-link.active { color: #fff; text-shadow: 0 0 10px rgba(255,255,255,0.5); }
-.active-pill { position: absolute; top: 0; left: 0; height: 100%; background: rgba(255, 255, 255, 0.1); border-radius: 20px; transition: all 0.4s cubic-bezier(0.25, 1, 0.5, 1); z-index: 1; }
+.nav-link {
+  position: relative; z-index: 2;
+  color: #a0a0a0; text-decoration: none; font-size: 15px;
+  padding: 8px 16px; border-radius: 20px;
+  transition: color 0.18s ease, text-shadow 0.18s ease;
+  cursor: pointer;
+}
+.nav-link.active { color: #fff; text-shadow: 0 0 10px rgba(255, 255, 255, 0.5); }
+.active-pill {
+  position: absolute; top: 0; left: 0; height: 100%;
+  background: rgba(255, 255, 255, 0.10);
+  border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 20px;
+  transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1), width 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 1; pointer-events: none;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
 .nav-right { display: flex; align-items: center; }
-.logout-btn { color: #fff; text-decoration: none; font-size: 14px; padding: 8px 16px; border-radius: 20px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); display: flex; align-items: center; gap: 6px; transition: all 0.3s; }
+.logout-btn {
+  color: #fff; text-decoration: none; font-size: 14px; padding: 8px 16px; border-radius: 20px;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  display: flex; align-items: center; gap: 6px; transition: all 0.3s;
+}
 .logout-btn:hover { background: rgba(255, 70, 70, 0.2); border-color: rgba(255, 70, 70, 0.5); }
 </style>

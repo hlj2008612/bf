@@ -3,32 +3,38 @@ import { WORLD_W, WORLD_H } from './config.js';
 import { mod } from './utils.js';
 import { updateRender } from './renderer.js';
 
+// 边界环绕修正，保证无限画布
 function wrapScroll() {
     state.scrollX = mod(state.scrollX, WORLD_W);
     state.scrollY = mod(state.scrollY, WORLD_H);
 }
 
+// 惯性滚动动画循环
 function mainLoop() {
     let shouldContinue = false;
     if (state.inertiaActive) {
         state.scrollX += state.velocityX;
         state.scrollY += state.velocityY;
         wrapScroll();
+
+        // 速度衰减
         state.velocityX *= 0.91;
         state.velocityY *= 0.91;
+
         if (Math.abs(state.velocityX) < 0.4 && Math.abs(state.velocityY) < 0.4) {
             state.inertiaActive = false;
-            state.velocityX = 0;
-            state.velocityY = 0;
+            state.velocityX = 0; state.velocityY = 0;
             if (state.canvas) state.canvas.classList.remove('grabbing');
         }
         updateRender();
         shouldContinue = state.inertiaActive;
     }
+
     if (state.needsUpdate && !state.inertiaActive) {
         state.needsUpdate = false;
         updateRender();
     }
+
     if (shouldContinue || state.needsUpdate) {
         state.rafId = requestAnimationFrame(mainLoop);
     } else {
@@ -55,7 +61,6 @@ export function startInertia() {
 
 export function stopInertia() {
     state.inertiaActive = false;
-    state.velocityX = 0;
-    state.velocityY = 0;
+    state.velocityX = 0; state.velocityY = 0;
     if (state.canvas) state.canvas.classList.remove('grabbing');
 }

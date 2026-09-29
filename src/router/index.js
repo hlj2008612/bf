@@ -2,15 +2,20 @@ import { createRouter, createWebHashHistory } from 'vue-router';
 import Login from '../views/Login.vue';
 import Home from '../views/Home.vue';
 import PhotoWall from '../views/PhotoWall.vue';
-import Cinema from '../views/Cinema.vue'; // 新增
-import Music from '../views/Music.vue';   // 新增
+import Cinema from '../views/Cinema.vue';
+import Music from '../views/Music.vue';
 
 const routes = [
-  { path: '/login', name: 'Login', component: Login },
-  { path: '/', name: 'Home', component: Home },
-  { path: '/wall', name: 'PhotoWall', component: PhotoWall, meta: { requiresAuth: true } },
-  { path: '/cinema', name: 'Cinema', component: Cinema }, // 新增
-  { path: '/music', name: 'Music', component: Music }      // 新增
+  // 登录页：独立页面，不显示导航栏
+  { path: '/login', name: 'Login', component: Login, meta: { hideNav: true } },
+  
+  // 照片墙：独立页面，不显示导航栏（沉浸式画布）
+  { path: '/wall', name: 'PhotoWall', component: PhotoWall, meta: { requiresAuth: true, hideNav: true } },
+  
+  // 其他页面：正常显示导航栏
+  { path: '/', name: 'Home', component: Home, meta: { requiresAuth: true } },
+  { path: '/cinema', name: 'Cinema', component: Cinema, meta: { requiresAuth: true } },
+  { path: '/music', name: 'Music', component: Music, meta: { requiresAuth: true } }
 ];
 
 const router = createRouter({

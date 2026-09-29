@@ -1,20 +1,10 @@
-/* 全局通用样式 */
 :root {
     --bg: #0d0d0d;
 }
 
-/* 隐藏浏览器滚动条 */
+/* 隐藏滚动条，避免干扰全屏画布 */
 ::-webkit-scrollbar {
     display: none;
     width: 0;
     height: 0;
-}
-
-body, html {
-    margin: 0;
-    padding: 0;
-    height: 100vh;
-    width: 100vw;
-    background: #0d0d0d;
-    overflow: hidden;
 }
