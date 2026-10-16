@@ -1,25 +1,37 @@
 import { state } from './state.js';
 import { WORLD_W, WORLD_H } from './config.js';
 import { stopInertia, startInertia, scheduleUpdate } from './inertia.js';
+import { setHover, imageIndexAt } from './renderer.js';
 
 // 统一获取坐标（兼容鼠标和触摸）
 function getPos(e) {
-    if (e.touches?.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-    if (e.changedTouches?.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
+    if (e.touches && e.touches.length) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+    if (e.changedTouches && e.changedTouches.length) return { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
     return { x: e.clientX, y: e.clientY };
+}
+
+// 键盘事件是否来自可输入控件 —— 旧实现里在登录表单输入密码时
+// 打一个 a/d/w/s/r 就会滚动照片墙并 preventDefault 吞掉按键。
+function isEditableTarget(el) {
+    if (!el) return false;
+    const tag = el.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+    if (el.isContentEditable) return true;
+    return false;
 }
 
 // 按下：记录起点，停止惯性
 function onPointerDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
     stopInertia();
     state.isDragging = true;
     const p = getPos(e);
     state.lastMouseX = p.x; state.lastMouseY = p.y;
     state.lastMoveTime = performance.now();
-    state.moveDxHistory = []; state.moveDyHistory = [];
+    setHover(-1);
     state.velocityX = 0; state.velocityY = 0;
     if (state.canvas) state.canvas.classList.add('grabbing');
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
 }
 
 // 移动：更新位置，并记录速度历史
@@ -30,19 +42,19 @@ function onPointerMove(e) {
     const dy = p.y - state.lastMouseY;
     const now = performance.now();
     const dt = Math.max(now - state.lastMoveTime, 1);
-    
+
     // 归一化到 60fps 速度
     state.moveDxHistory.push((dx / dt) * 16.67);
     state.moveDyHistory.push((dy / dt) * 16.67);
     if (state.moveDxHistory.length > 5) state.moveDxHistory.shift();
     if (state.moveDyHistory.length > 5) state.moveDyHistory.shift();
-    
+
     state.scrollX += dx;
     state.scrollY += dy;
     state.lastMouseX = p.x; state.lastMouseY = p.y;
     state.lastMoveTime = now;
     scheduleUpdate();
-    e.preventDefault();
+    if (e.cancelable) e.preventDefault();
 }
 
 // 松手：计算平均速度，触发惯性
@@ -56,7 +68,7 @@ function onPointerUp() {
     // 速度上限，防止飞出去
     if (Math.abs(state.velocityX) > 35) state.velocityX = Math.sign(state.velocityX) * 35;
     if (Math.abs(state.velocityY) > 35) state.velocityY = Math.sign(state.velocityY) * 35;
-    
+
     if (Math.abs(state.velocityX) > 0.4 || Math.abs(state.velocityY) > 0.4) {
         startInertia();
     } else {
@@ -64,6 +76,53 @@ function onPointerUp() {
         scheduleUpdate();
     }
     state.moveDxHistory = []; state.moveDyHistory = [];
+}
+
+// 【旧 bug 修复】以前绑的是 window 的 'mouseleave'：
+// 鼠标离开文档时 window 上并不触发它，拖拽状态会卡住（松手后仍在拖）。
+// 文档边界事件应该是 document 的 'mouseleave'（也叫 mouseout），
+// 同时补上 window 失焦 / 页面隐藏时的兜底复位。
+function onWindowBlur() {
+    abortDrag();
+}
+
+function onPointerCancel() {
+    abortDrag();
+}
+
+// 【旧 bug 修复】失焦 / 切后台属于【中断】，不是"用户松手"：绝不能走 onPointerUp()。
+// onPointerUp() 会从 moveDxHistory 算出速度并 startInertia()，于是：
+//   - 拖拽中切走窗口  -> 照片墙带着接近上限的速度自己飞走；
+//   - 切到后台标签页  -> 惯性循环在隐藏标签里继续跑（白耗 CPU / 电量）。
+// 中断的正确语义是：立刻停住并清理拖拽状态。
+function abortDrag() {
+    state.isDragging = false;
+    state.moveDxHistory = [];
+    state.moveDyHistory = [];
+    stopInertia();
+    if (state.canvas) state.canvas.classList.remove('grabbing');
+    scheduleUpdate();
+}
+
+// 悬停放大：直接命中测试，不依赖 300 个卡片节点的事件监听
+function onHoverMove(e) {
+    if (state.isDragging) return;
+    const viewW = state.viewW;
+    const viewH = state.viewH;
+    const dynamicScale = Math.min(1.4, Math.max(0.5, Math.min(viewW / 1400, viewH / 900)));
+    const currentStep = 340 * dynamicScale;
+    const halfX = e.clientX - viewW / 2;
+    const halfY = e.clientY - viewH / 2;
+    const sx = (state.scrollX + halfX) / currentStep;
+    const sy = (state.scrollY + halfY) / currentStep;
+    const m = Math.round(-state.scrollX / currentStep - sx);
+    const n = Math.round(-state.scrollY / currentStep - sy);
+    // 回到「离当前滚动位置最近的」那一份网格坐标（与渲染引擎的 m/n 推导同源）
+    const c = sx + m * WORLD_COLS;
+    const r = sy + n * WORLD_ROWS;
+    const wrappedCol = ((c % WORLD_COLS) + WORLD_COLS) % WORLD_COLS;
+    const wrappedRow = ((r % WORLD_ROWS) + WORLD_ROWS) % WORLD_ROWS;
+    setHover(imageIndexAt(wrappedCol, wrappedRow) - 1);
 }
 
 // 滚轮：直接滚动，不停留惯性
@@ -78,6 +137,10 @@ function onWheel(e) {
 
 // 键盘：WASD / 方向键移动，R 重置
 function onKeyDown(e) {
+    // 焦点在输入框 / 可编辑区域时完全不接管键盘
+    if (isEditableTarget(e.target) || isEditableTarget(document.activeElement)) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+
     const key = e.key.toLowerCase();
     let handled = true;
     switch (key) {
@@ -85,21 +148,42 @@ function onKeyDown(e) {
         case 'arrowright': case 'd': stopInertia(); state.scrollX += 200; break;
         case 'arrowup': case 'w': stopInertia(); state.scrollY -= 200; break;
         case 'arrowdown': case 's': stopInertia(); state.scrollY += 200; break;
-        case 'r': 
-            stopInertia(); 
-            state.scrollX = WORLD_W / 2 - state.viewW / 2; 
-            state.scrollY = WORLD_H / 2 - state.viewH / 2; 
+        case 'r':
+            stopInertia();
+            state.scrollX = WORLD_W / 2 - state.viewW / 2;
+            state.scrollY = WORLD_H / 2 - state.viewH / 2;
             break;
         default: handled = false;
     }
     if (handled) { scheduleUpdate(); e.preventDefault(); }
 }
 
+// 窗口缩放：用匹配媒体变化 + rAF 折叠连发事件，避免拖动窗口时反复渲染
+let hoverPending = false;
+let hoverEvent = null;
+let resizePending = false;
+
+function onHoverRaw(e) {
+    hoverEvent = e;
+    if (hoverPending) return;
+    hoverPending = true;
+    requestAnimationFrame(() => {
+        hoverPending = false;
+        if (hoverEvent) onHoverMove(hoverEvent);
+        hoverEvent = null;
+    });
+}
+
 // 窗口缩放
 function onResize() {
     state.viewW = window.innerWidth;
     state.viewH = window.innerHeight;
-    scheduleUpdate();
+    if (resizePending) return;
+    resizePending = true;
+    requestAnimationFrame(() => {
+        resizePending = false;
+        scheduleUpdate();
+    });
 }
 
 // 绑定所有事件
@@ -107,22 +191,33 @@ export function bindEvents(canvasEl) {
     canvasEl.addEventListener('mousedown', onPointerDown);
     window.addEventListener('mousemove', onPointerMove);
     window.addEventListener('mouseup', onPointerUp);
-    window.addEventListener('mouseleave', onPointerUp);
+    window.addEventListener('blur', onWindowBlur);
+    document.addEventListener('mouseleave', onPointerUp);
+    document.addEventListener('visibilitychange', onPointerCancel);
     canvasEl.addEventListener('touchstart', onPointerDown, { passive: false });
     window.addEventListener('touchmove', onPointerMove, { passive: false });
     window.addEventListener('touchend', onPointerUp);
     window.addEventListener('touchcancel', onPointerUp);
     canvasEl.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('resize', onResize);
+    window.addEventListener('resize', onResize, { passive: true });
+    canvasEl.addEventListener('mousemove', onHoverRaw, { passive: true });
+    canvasEl.addEventListener('mouseleave', onHoverOut, { passive: true });
+}
+
+function onHoverOut() {
+    setHover(-1);
 }
 
 // 解绑所有事件（组件销毁时必须调用）
 export function unbindEvents(canvasEl) {
+    if (!canvasEl) return;
     canvasEl.removeEventListener('mousedown', onPointerDown);
     window.removeEventListener('mousemove', onPointerMove);
     window.removeEventListener('mouseup', onPointerUp);
-    window.removeEventListener('mouseleave', onPointerUp);
+    window.removeEventListener('blur', onWindowBlur);
+    document.removeEventListener('mouseleave', onPointerUp);
+    document.removeEventListener('visibilitychange', onPointerCancel);
     canvasEl.removeEventListener('touchstart', onPointerDown);
     window.removeEventListener('touchmove', onPointerMove);
     window.removeEventListener('touchend', onPointerUp);
@@ -130,4 +225,7 @@ export function unbindEvents(canvasEl) {
     canvasEl.removeEventListener('wheel', onWheel);
     window.removeEventListener('keydown', onKeyDown);
     window.removeEventListener('resize', onResize);
+    canvasEl.removeEventListener('mousemove', onHoverRaw);
+    canvasEl.removeEventListener('mouseleave', onHoverOut);
+    setHover(-1);
 }

@@ -6,9 +6,12 @@
         <!-- 半透明高亮胶囊，根据 active 元素动态计算位置 -->
         <div class="active-pill" :style="pillStyle"></div>
         <a v-for="item in navItems" :key="item.path"
-           href="#" 
-           class="nav-link" 
+           ref="linkRefs"
+           href="#"
+           class="nav-link"
            :class="{ active: currentPath === item.path }"
+           :aria-current="currentPath === item.path ? 'page' : undefined"
+           :aria-label="item.name"
            @click.prevent="handleNavigate(item)">
           {{ item.name }}
         </a>
@@ -33,6 +36,11 @@ const router = useRouter();
 const currentPath = ref(route.path);
 const pillStyle = ref({});
 
+// 【修复】原来用 document.querySelector('.nav-link.active') 做全局查询：
+// 依赖 DOM 里恰好只有一个 .active 元素，任何同名类（比如页面里别处的 .active）
+// 都会让胶囊跑到错误的元素上。改为模板 ref + 按索引取值，不再有全局查找。
+const linkRefs = ref([]);
+
 const navItems = [
   { name: '首页', path: '/', title: 'HOME', color: '#8b6ce8' },
   { name: '照片墙', path: '/wall', title: 'GALLERY', color: '#4a9eff' },
@@ -40,15 +48,25 @@ const navItems = [
   { name: '音乐', path: '/music', title: 'MUSIC', color: '#eb418d' }
 ];
 
-// 计算胶囊宽度和位置
+// 计算胶囊宽度和位置（v-for 里的 ref 数组顺序与 navItems 一致）
 const updatePill = () => {
-  const activeEl = document.querySelector('.nav-link.active');
-  if (activeEl) {
-    pillStyle.value = {
-      width: `${activeEl.offsetWidth}px`,
-      transform: `translateX(${activeEl.offsetLeft}px)`
-    };
-  }
+  const idx = navItems.findIndex((item) => item.path === currentPath.value);
+  const els = linkRefs.value;
+  if (idx < 0 || !els || !els.length) return;
+
+  // 用 getBoundingClientRect 相对 .nav-items 测量，避免依赖 offsetParent 链
+  const activeEl = els.find((el) => el && el.classList.contains('active')) || els[idx];
+  if (!activeEl) return;
+
+  const parent = activeEl.offsetParent || activeEl.parentElement;
+  if (!parent) return;
+
+  const rect = activeEl.getBoundingClientRect();
+  const parentRect = parent.getBoundingClientRect();
+  pillStyle.value = {
+    width: `${Math.round(rect.width)}px`,
+    transform: `translateX(${Math.round(rect.left - parentRect.left)}px)`
+  };
 };
 
 // 监听路由变化，校准 active 状态
