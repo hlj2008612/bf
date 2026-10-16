@@ -43,14 +43,26 @@ function onPointerMove(e) {
     const now = performance.now();
     const dt = Math.max(now - state.lastMoveTime, 1);
 
+    // 【bug 修复】拖拽方向反了。
+    // renderer.js 里 scrollX 是【摄像机左边界】：cellX = 世界坐标 - scrollX
+    // （见 renderer.js:258）。所以 scrollX 变大 = 摄像机右移 = 内容在屏幕上【向左】走。
+    // 旧实现写的是 `scrollX += dx`，于是鼠标向右拖 100px，卡片反而左移 100px ——
+    // 抓住内容拖却朝反方向跑。正确手感是"内容跟着手走"，故这里取负。
+    //
+    // 速度历史必须用同一个符号：onPointerUp() 会从 moveDxHistory 求平均得到
+    // velocityX，而 inertia.js:27 是 `scrollX += velocityX`。若只改滚动不改速度，
+    // 松手瞬间照片墙会朝反方向飞出去。
+    const scrollDx = -dx;
+    const scrollDy = -dy;
+
     // 归一化到 60fps 速度
-    state.moveDxHistory.push((dx / dt) * 16.67);
-    state.moveDyHistory.push((dy / dt) * 16.67);
+    state.moveDxHistory.push((scrollDx / dt) * 16.67);
+    state.moveDyHistory.push((scrollDy / dt) * 16.67);
     if (state.moveDxHistory.length > 5) state.moveDxHistory.shift();
     if (state.moveDyHistory.length > 5) state.moveDyHistory.shift();
 
-    state.scrollX += dx;
-    state.scrollY += dy;
+    state.scrollX += scrollDx;
+    state.scrollY += scrollDy;
     state.lastMouseX = p.x; state.lastMouseY = p.y;
     state.lastMoveTime = now;
     scheduleUpdate();
