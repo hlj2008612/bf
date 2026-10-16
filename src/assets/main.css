@@ -71,3 +71,85 @@ body {
     outline: 2px solid #4a9eff;
     outline-offset: 2px;
 }
+
+/* ================================================================
+   参考站转场复刻：View Transitions 立方体翻转
+   ----------------------------------------------------------------
+   数值逐字取自参考站 https://forum.hanakos.cc 的编译产物
+   （_refchunks/site.css，被压缩成一行的原样文本）：
+
+     html[data-pt]::view-transition{background:#0a0a0a url(/mos-background-1920.webp) 50%/cover no-repeat}
+     html[data-pt]::view-transition-image-pair(root){perspective:1400px}
+     html[data-pt]::view-transition-new(root),html[data-pt]::view-transition-old(root){
+       transform-origin:50% 50% -50vw;animation-duration:.5s;
+       animation-timing-function:cubic-bezier(.45,.05,.25,1);animation-fill-mode:both}
+     html[data-pt=next]::view-transition-old(root){animation-name:pt-cube-out-next}
+     html[data-pt=next]::view-transition-new(root){animation-name:pt-cube-in-next}
+     html[data-pt=prev]::view-transition-old(root){animation-name:pt-cube-out-prev}
+     html[data-pt=prev]::view-transition-new(root){animation-name:pt-cube-in-prev}
+     @keyframes pt-cube-out-next{0%{transform:rotateY(0deg)}to{transform:rotateY(-90deg)}}
+     @keyframes pt-cube-in-next{0%{transform:rotateY(90deg)}to{transform:rotateY(0deg)}}
+     @keyframes pt-cube-out-prev{0%{transform:rotateY(0deg)}to{transform:rotateY(90deg)}}
+     @keyframes pt-cube-in-prev{0%{transform:rotateY(-90deg)}to{transform:rotateY(0deg)}}
+
+   唯一的偏差：原站背景是 url(/mos-background-1920.webp) 那张图，我方没有这张图，
+   按任务要求换成纯色 #0a0a0a（保持其余简写语法位置一致）。
+
+   注意：@keyframes 名（pt-cube-*）是全局命名空间，不能加 scoped；
+   而且 ::view-transition 伪元素挂在根元素上，只有非 scoped 的全局样式才生效，
+   所以这一段必须留在 main.css，不能挪进组件的 <style scoped>。
+   ================================================================ */
+
+/* data-pt 由 src/core/pageTransition.js 在转场开始时写到 <html> 上，
+   转场结束（.finished.finally）时若仍属于本轮则删除。 */
+html[data-pt]::view-transition {
+    background: #0a0a0a 50% / cover no-repeat;
+}
+
+html[data-pt]::view-transition-image-pair(root) {
+    perspective: 1400px;
+}
+
+html[data-pt]::view-transition-new(root),
+html[data-pt]::view-transition-old(root) {
+    transform-origin: 50% 50% -50vw;
+    animation-duration: .5s;
+    animation-timing-function: cubic-bezier(.45, .05, .25, 1);
+    animation-fill-mode: both;
+}
+
+html[data-pt=next]::view-transition-old(root) {
+    animation-name: pt-cube-out-next;
+}
+
+html[data-pt=next]::view-transition-new(root) {
+    animation-name: pt-cube-in-next;
+}
+
+html[data-pt=prev]::view-transition-old(root) {
+    animation-name: pt-cube-out-prev;
+}
+
+html[data-pt=prev]::view-transition-new(root) {
+    animation-name: pt-cube-in-prev;
+}
+
+@keyframes pt-cube-out-next {
+    0% { transform: rotateY(0deg); }
+    to { transform: rotateY(-90deg); }
+}
+
+@keyframes pt-cube-in-next {
+    0% { transform: rotateY(90deg); }
+    to { transform: rotateY(0deg); }
+}
+
+@keyframes pt-cube-out-prev {
+    0% { transform: rotateY(0deg); }
+    to { transform: rotateY(90deg); }
+}
+
+@keyframes pt-cube-in-prev {
+    0% { transform: rotateY(-90deg); }
+    to { transform: rotateY(0deg); }
+}
