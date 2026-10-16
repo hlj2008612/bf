@@ -8,8 +8,7 @@ import { rm } from 'node:fs/promises';
 //  照片墙构建配置
 //  ---------------------------------------------------------------
 //  目标：
-//   1. 主包（vue + vue-router）与 gsap 分包 —— 照片墙路由首屏不必为
-//      转场动画库（gsap 仅被 PageTransition.vue 引用）买单。
+//   1. vue + vue-router 合并成主包，产物按 js / css / img 分目录。
 //   2. 所有产物带内容哈希，按 js / css / img 分目录，可长期强缓存。
 //   3. 构建结束时用 Node 内置 zlib 打印 raw / gzip / brotli 体积表，
 //      并写出 dist/.build-report.json —— 这是性能结论的证据，
@@ -35,7 +34,7 @@ import { rm } from 'node:fs/promises';
  *
  * 后果：dist/assets/ 永远清不掉，每次构建只在里面【新增】带新哈希的产物，
  * 旧产物无限累积。实测 dist/ 涨到 55 个文件，多出的 4 个全是历史版本的
- * index-*.css / index-*.js / PageTransition-*.css / PageTransition-*.js，
+ * index-*.css / index-*.js 等历史版本的产物，
  * 它们会被一并上传到服务器，体积随每次迭代线性增长。
  *
  * 为什么放在 buildStart：早于 Vite 写产物也早于 copyPublicDir 的拷贝。
@@ -278,13 +277,11 @@ export default defineConfig({
           return 'assets/[name]-[hash][extname]';
         },
 
-        // 手写分包：vue 全家桶一个主包，gsap 单独一个按需加载的包。
-        // 照片墙路由不 import PageTransition，因此首屏不会下载 gsap chunk。
+        // 手写分包：vue 全家桶合并成一个 vendor 主包。
+        // （转场已改为纯 CSS 的 ptr 覆盖层，不再依赖 gsap，故无额外分包。）
         manualChunks: (id) => {
           if (!id.includes('node_modules')) return null;
-          const norm = id.replace(/\\/g, '/');
-          if (/node_modules\/gsap\//.test(norm)) return 'gsap';
-          if (/node_modules\/(vue|vue-router|@vue)\//.test(norm)) return 'vendor';
+          if (/node_modules\/(vue|vue-router|@vue)\//.test(id.replace(/\\/g, '/'))) return 'vendor';
           return 'vendor';
         },
       },

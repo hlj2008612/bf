@@ -10,7 +10,6 @@ Vue 3 + Vite 重构版照片墙。用无限画布把 20 张照片铺满整面墙
 | --- | --- | --- |
 | Vue | 3.4 | 视图层 |
 | vue-router | 4.3 | Hash 路由（`createWebHashHistory`，静态托管友好） |
-| GSAP | 3.12 | 页面转场动画（**仅** `src/components/PageTransition.vue` 使用） |
 | Vite | 5 | 构建 / 开发服务器 |
 
 ## 目录结构
@@ -29,7 +28,7 @@ assets-src/images/zmq/  97 MB 原图，【不在】public/ 下，因此不会进
 src/
   core/                 原生 JS 照片墙引擎（渲染、惯性、输入、状态）
   views/                PhotoWall / Home / Cinema / Music / Login
-  components/           NavBar / PageTransition
+  components/           NavBar / PtrTransition（ptr 擦除转场覆盖层）
 ```
 
 ## 命令
@@ -129,7 +128,7 @@ GitHub Pages 上实际生效的（且无法用仓库内配置文件覆盖）是�
 
 `vite.config.js` 里做了这些事：
 
-1. **代码分割**：`vue` + `vue-router` 进 `vendor` chunk；`gsap` 单独进 `gsap` chunk。GSAP 只被 `PageTransition.vue` 引用，而照片墙路由（`/wall`）渲染时导航栏和转场组件都不挂载（`meta.hideNav`），因此首屏不必为动画库买单。
+1. **代码分割**：`vue` + `vue-router` 合并进 `vendor` chunk（唯一的第三方包）。转场已改为纯 CSS 的 ptr 覆盖层，不再依赖 gsap，因此没有额外的动画库分块。
 2. **内容哈希 + 分目录**：`assets/js/[name]-[hash].js`、`assets/css/[name]-[hash].css`、`assets/img/[name]-[hash][extname]`。
 3. **`target: 'es2018'`**：覆盖更老的浏览器 / 内嵌 WebView。
 4. **`cssCodeSplit: true`、`sourcemap: false`、`reportCompressedSize: true`**。

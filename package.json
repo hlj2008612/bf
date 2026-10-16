@@ -11,7 +11,6 @@
     "analyze": "node scripts/analyze-dist.mjs"
   },
   "dependencies": {
-    "gsap": "^3.12.5",
     "vue": "^3.4.0",
     "vue-router": "^4.3.0"
   },
