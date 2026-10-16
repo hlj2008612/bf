@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { brotliCompressSync, gzipSync, constants as zlibConstants } from 'node:zlib';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 
 // ================================================================
@@ -21,6 +21,39 @@ import { rm } from 'node:fs/promises';
  * 在 writeBundle 阶段读取每个已落盘产物，用 zlib 计算 gzip / brotli，
  * 打印表格并写出 dist/.build-report.json。
  */
+/**
+ * 清空 dist/ 顶层的陈旧产物（保留 .git，由调用方决定是否删除）。
+ *
+ * ⚠️ 为什么不能只靠 build.emptyOutDir（本机已实测，别再想当然）：
+ * Vite 的 emptyDir() 用的是【同步】fs.rmSync(path, { recursive: true, force: true })
+ * （node_modules/vite/dist/node/chunks/node.js:2375）。
+ * 而在本机 Node v24.12.0 上 rmSync 会【静默返回且不删除任何东西】——不抛错、不警告：
+ *   rmSync(非空目录, {recursive:true, force:true}) -> 目录仍在
+ *   rmSync(普通文件, {force:true})                 -> 文件仍在
+ *   rmdirSync(目录, {recursive:true})              -> 目录仍在
+ * 而 unlinkSync / fs.promises.rm / fs.promises.unlink 均正常。
+ *
+ * 后果：dist/assets/ 永远清不掉，每次构建只在里面【新增】带新哈希的产物，
+ * 旧产物无限累积。实测 dist/ 涨到 55 个文件，多出的 4 个全是历史版本的
+ * index-*.css / index-*.js / PageTransition-*.css / PageTransition-*.js，
+ * 它们会被一并上传到服务器，体积随每次迭代线性增长。
+ *
+ * 为什么放在 buildStart：早于 Vite 写产物也早于 copyPublicDir 的拷贝。
+ * public/ 里的 _headers、favicon.svg 等是在 emptyDir 之后才拷进 dist 的，
+ * 所以此刻整体清空不会误删它们。
+ */
+async function removeStaleOutput() {
+  const outDir = new URL('./dist/', import.meta.url);
+  if (!existsSync(outDir)) return;
+
+  for (const entry of readdirSync(outDir)) {
+    // .git 交给调用方的守卫单独处理，避免和它的"是否删成功"判断打架
+    if (entry === '.git') continue;
+    // 用 join + fileURLToPath 之外的写法会踩 Windows 盘符，这里直接从 URL 还原
+    await rm(new URL(entry, outDir), { recursive: true, force: true });
+  }
+}
+
 function bundleSizeReport({ fileName = '.build-report.json' } = {}) {
   const outDirUrl = new URL('./dist/', import.meta.url);
 
@@ -49,6 +82,12 @@ function bundleSizeReport({ fileName = '.build-report.json' } = {}) {
      * 本次构建的发布污染，也让 Vite 后续的 emptyDir 无事可做。
      */
     async buildStart() {
+      // 【第一步】无论 .git 守卫走哪个分支，都要先清掉上一次构建的陈旧产物。
+      // 为什么必须自己做，见 removeStaleOutput 的说明。
+      if (process.env.PHOTO_WALL_ALLOW_DIST_GIT !== '1') {
+        await removeStaleOutput();
+      }
+
       if (process.env.PHOTO_WALL_ALLOW_DIST_GIT === '1') return;
 
       const stale = new URL('.git', outDirUrl);
