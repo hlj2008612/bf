@@ -23,7 +23,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import NavBar from './components/NavBar.vue';
 import PtrTransition from './components/PtrTransition.vue';
@@ -104,6 +104,30 @@ const handleNavigate = async (item) => {
 const handleLogout = async () => {
   await runTransition(LOGOUT_PATH);
 };
+
+/**
+ * 把转场入口暴露到 window，供无法直接访问本组件上下文的子路由使用。
+ *
+ * 【为什么需要它】runTransition 定义在这里，而 src/views/PhotoWall.vue 是子路由，
+ * 拿不到本组件的上下文；/wall 上导航栏又是隐藏的（hideNav），它的关闭按钮
+ * 是唯一的出口，必须也能走转场。参考站的转场是【全局点击拦截】，
+ * 任何 <a> 都被接管，所以不存在这种"漏网的导航"；这里用一个小桥接等价实现。
+ *
+ * 【为什么不用 provide/inject】App.vue 的 <router-view /> 没有具名插槽中转，
+ * 而 /wall 是 hideNav 路由、NavBar 并不渲染，注入链路要靠 router-view 传递，
+ * 反而更绕。window 上挂一个函数最直接，且离开页面时会被摘掉。
+ */
+onMounted(() => {
+  if (typeof window !== 'undefined') {
+    window.playPageTransition = (target) => runTransition(target);
+  }
+});
+
+onUnmounted(() => {
+  if (typeof window !== 'undefined' && window.playPageTransition) {
+    delete window.playPageTransition;
+  }
+});
 </script>
 
 <!--

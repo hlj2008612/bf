@@ -51,7 +51,18 @@ onUnmounted(() => {
 });
 
 // 关闭按钮：返回首页
+//
+// 【为什么不是 router.push('/')】那样会绕开转场覆盖层，直接硬跳 ——
+// 站内其它所有导航（导航栏、退出登录）都走 App.vue 的 runTransition，
+// 只有这里不播，退出照片墙时会突兀地闪一下。转场由覆盖层自己负责 push，
+// 时机是"擦入盖住旧页面之后"，所以这里只需要把目标路径交给它。
 const handleClose = () => {
+  if (typeof window !== 'undefined' && typeof window.playPageTransition === 'function') {
+    window.playPageTransition('/');
+    return;
+  }
+  // 理论上不该发生（App.vue 常驻挂载时就会装上这个桥接）。
+  // 真的没有也不能让点击失效：退化成原来的直接跳转。
   router.push('/');
 };
 </script>
