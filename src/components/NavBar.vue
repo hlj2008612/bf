@@ -87,7 +87,15 @@ onUnmounted(() => {
   window.removeEventListener('resize', updatePill);
 });
 
-// 点击瞬间立即移动胶囊，然后才触发转场
+// 点击瞬间立即移动胶囊，然后才通知父组件导航。
+//
+// 【为什么先动胶囊再跳】转场要等父组件拿到实例后才开始擦入（约 .28s 的擦入动画
+// 加上 440ms 的最小等待），若胶囊等路由变化后再动，用户会先看到胶囊"没反应"。
+// 乐观更新让点击立刻有反馈。
+//
+// 【幂等】同一个路径重复点击直接返回，不触发父组件的导航去重逻辑
+// （父组件同样有一道 route.path === target 的短路，两处都不多余：
+//  父组件要防的是程序化调用，这里防的是重复点击带来的无意义 emit）。
 const handleNavigate = async (item) => {
   if (currentPath.value === item.path) return;
   currentPath.value = item.path;
@@ -96,14 +104,17 @@ const handleNavigate = async (item) => {
   emit('navigate', item);
 };
 
-// 【为什么要交给父组件】退出原本是"清 sessionStorage + 直接 push('/login')"，
-// 完全绕过转场。而转场需要 PageTransition 实例，它挂在 App.vue 上，NavBar 拿不到。
-// 所以这里只负责清除登录态（必须同步、且早于路由跳转），然后把转场+跳转委托给父组件。
+// 【为什么退出要委托给父组件】清登录态这件事必须【同步、且早于路由跳转】，
+// 但真正发起导航的是 App.vue（它持有 router 并统一处理导航去重与竞态）。
+// 所以这里只负责清除登录态，然后把跳转委托给父组件。
 //
-// 【为什么清除要放在这里而不是父组件】router/index.js:40 有守卫
+// 【为什么清除必须留在这里而不是父组件】router/index.js 有守卫
 //   if (to.path === '/login' && isLoggedIn()) return '/';
 // 如果登录态留到路由跳转那一刻才清，守卫会把 /login 弹回 '/'，退出就失败了。
-// 所以必须在触发转场之前同步清掉。
+// 所以必须在触发任何导航之前同步清掉。
+//
+// 注意：真正的导航由父组件的 handleLogout 发起，它会走 PtrTransition 的
+// 擦除转场（擦入盖住 -> 切路由 -> 擦出揭示），见 src/App.vue。
 const logout = () => {
   try {
     sessionStorage.removeItem('photoWallLoggedIn');
