@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "optimize:images": "node scripts/optimize-images.mjs",
+    "analyze": "node scripts/analyze-dist.mjs"
   },
   "dependencies": {
     "gsap": "^3.12.5",

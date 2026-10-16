@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# 构建体积报告（dist/ 已整体忽略，这行是防止有人把它挪到根目录后误提交）
+.build-report.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
