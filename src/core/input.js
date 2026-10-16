@@ -1,5 +1,5 @@
 import { state } from './state.js';
-import { WORLD_W, WORLD_H } from './config.js';
+import { WORLD_W, WORLD_H, WORLD_COLS, WORLD_ROWS } from './config.js';
 import { stopInertia, startInertia, scheduleUpdate } from './inertia.js';
 import { setHover, imageIndexAt } from './renderer.js';
 
@@ -123,18 +123,34 @@ function onHoverMove(e) {
     const viewH = state.viewH;
     const dynamicScale = Math.min(1.4, Math.max(0.5, Math.min(viewW / 1400, viewH / 900)));
     const currentStep = 340 * dynamicScale;
-    const halfX = e.clientX - viewW / 2;
-    const halfY = e.clientY - viewH / 2;
-    const sx = (state.scrollX + halfX) / currentStep;
-    const sy = (state.scrollY + halfY) / currentStep;
-    const m = Math.round(-state.scrollX / currentStep - sx);
-    const n = Math.round(-state.scrollY / currentStep - sy);
-    // 回到「离当前滚动位置最近的」那一份网格坐标（与渲染引擎的 m/n 推导同源）
-    const c = sx + m * WORLD_COLS;
-    const r = sy + n * WORLD_ROWS;
-    const wrappedCol = ((c % WORLD_COLS) + WORLD_COLS) % WORLD_COLS;
-    const wrappedRow = ((r % WORLD_ROWS) + WORLD_ROWS) % WORLD_ROWS;
-    setHover(imageIndexAt(wrappedCol, wrappedRow) - 1);
+    // 【旧 bug 修复】原实现自己造了一套坐标推导，且把 scrollX 用了两次：
+    //   sx = (scrollX + clientX - viewW/2) / step
+    //   m  = round(-scrollX / step - sx)          <- 这里又减了一次 scrollX
+    // 展开后 clientX 的系数是负的（鼠标右移、格子坐标反而变小），且 scrollX 被计入两遍，
+    // 算出的 imgIdx 与鼠标实际所在的卡片【永远对不上】，于是 isHovered 恒为 false ——
+    // 悬停放大与 full 大图整体失效（真机实测：鼠标停在卡片正中心也毫无反应）。
+    //
+    // 正确推导（与 renderer.js 的 cellX = (wrappedCol + COLS*m)*step - scrollX 同源）：
+    //   屏幕点落在格子 worldCol 上  <=>  worldCol*step - scrollX <= clientX
+    //   => stateCol = floor((clientX + scrollX) / currentStep)
+    // stateCol 是整数，取模后 wrappedCol 必然是整数 —— 这正是 imageIndexAt(col,row)
+    // 所要求的（旧实现传进去的是浮点数，取模结果不可控）。
+    const stateCol = Math.floor((e.clientX + state.scrollX) / currentStep);
+    const stateRow = Math.floor((e.clientY + state.scrollY) / currentStep);
+    const wrappedCol = ((stateCol % WORLD_COLS) + WORLD_COLS) % WORLD_COLS;
+    const wrappedRow = ((stateRow % WORLD_ROWS) + WORLD_ROWS) % WORLD_ROWS;
+    const next = imageIndexAt(wrappedCol, wrappedRow) - 1;
+
+    // 【旧 bug 修复】旧实现只写了 state.hoverIndex 就结束了，从不请求重绘。
+    // 悬停判定发生在渲染循环内部（renderer.js 的 isHovered = hoverIdx === card.imgIdx - 1），
+    // 所以状态变了而没人驱动渲染时，放大与 full 大图都不会出现 ——
+    // 只能等下一次碰巧有别的渲染（拖动、缩放、惯性）才会顺带生效。
+    // 真机实测证据：悬停后无任何反应，手动调一次 canvasAPI.refresh() 立刻出现 2 张 full 图。
+    // 这里只在序号真的变化时请求重绘，避免鼠标高频移动时疯狂排帧。
+    if (next !== state.hoverIndex) {
+        setHover(next);
+        scheduleUpdate();
+    }
 }
 
 // 滚轮：直接滚动，不停留惯性
@@ -218,7 +234,11 @@ export function bindEvents(canvasEl) {
 }
 
 function onHoverOut() {
-    setHover(-1);
+    // 同上：离开画布同样要请求重绘，否则放大效果会一直停在最后一张悬停的卡片上
+    if (state.hoverIndex !== -1) {
+        setHover(-1);
+        scheduleUpdate();
+    }
 }
 
 // 解绑所有事件（组件销毁时必须调用）
