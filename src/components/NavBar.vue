@@ -27,11 +27,10 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, watch } from 'vue';
-import { useRoute, useRouter } from 'vue-router';
+import { useRoute } from 'vue-router';
 
-const emit = defineEmits(['navigate']);
+const emit = defineEmits(['navigate', 'logout']);
 const route = useRoute();
-const router = useRouter();
 
 const currentPath = ref(route.path);
 const pillStyle = ref({});
@@ -97,9 +96,21 @@ const handleNavigate = async (item) => {
   emit('navigate', item);
 };
 
+// 【为什么要交给父组件】退出原本是"清 sessionStorage + 直接 push('/login')"，
+// 完全绕过转场。而转场需要 PageTransition 实例，它挂在 App.vue 上，NavBar 拿不到。
+// 所以这里只负责清除登录态（必须同步、且早于路由跳转），然后把转场+跳转委托给父组件。
+//
+// 【为什么清除要放在这里而不是父组件】router/index.js:40 有守卫
+//   if (to.path === '/login' && isLoggedIn()) return '/';
+// 如果登录态留到路由跳转那一刻才清，守卫会把 /login 弹回 '/'，退出就失败了。
+// 所以必须在触发转场之前同步清掉。
 const logout = () => {
-  sessionStorage.removeItem('photoWallLoggedIn');
-  router.push('/login');
+  try {
+    sessionStorage.removeItem('photoWallLoggedIn');
+  } catch (e) {
+    // 隐私模式下 sessionStorage 访问会抛异常，不能让退出按钮整个失效
+  }
+  emit('logout');
 };
 </script>
 

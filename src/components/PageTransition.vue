@@ -48,9 +48,16 @@ onMounted(() => {
  * @param {string} targetPath - 目标路由
  * @param {object} options - 可选配置
  *   options.delayRoute: 如果为 true，则等转场完全结束才切换路由（默认在胶片覆盖时切换）
+ * @returns {boolean} true = 本次转场已接受并开始播放；false = 上一个转场还没结束，本次被丢弃。
+ *   调用方在 delayRoute 模式下拿到 false 时必须自己兜底导航，否则点击会被静默吞掉。
  */
 const play = (title, color, targetPath, options = {}) => {
-  if (isTransitioning) return;
+  // 【为什么要返回布尔值】转场进行中时会直接丢弃本次请求。调用方拿不到任何信号，
+  // 如果它依赖 onComplete 里的 router.push 来完成导航（delayRoute 模式），
+  // 这个点击就被静默吞掉了。退出登录尤其危险：NavBar 已经同步清掉了登录标记，
+  // 用户却停在原页面，观感是"点了退出没反应"。
+  // 所以这里把"是否被接受"告诉调用方，由它决定兜底导航。
+  if (isTransitioning) return false;
   isTransitioning = true;
 
   colorPanel.value.style.background = color;
@@ -98,6 +105,8 @@ const play = (title, color, targetPath, options = {}) => {
     .to(filmPanel.value, { xPercent: 100, duration: 0.20 })
     .to(paperPanel.value, { xPercent: 100, duration: 0.15 }, "-=0.05")
     .to(colorPanel.value, { xPercent: 100, duration: 0.15 }, "-=0.05");
+
+  return true;
 };
 
 defineExpose({ play });
