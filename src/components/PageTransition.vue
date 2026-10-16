@@ -131,6 +131,11 @@ defineExpose({ play });
   clip-path: polygon(30% 0, 100% 0, 90% 100%, 10% 100%);
   overflow: hidden; will-change: transform; transform-origin: center center;
 }
+/* 对角条纹。
+   注意：这里【不能】设 background-size —— repeating-linear-gradient 本身就会
+   沿渐变线无缝重复铺满整个元素；一旦套上 background-size，浏览器会把背景切成
+   一个个方块、每块独立绘制，块与块之间条纹相位不连续，就会出现肉眼可见的
+   “断条 / 半截条纹”。这正是之前转场时条纹不完整的原因。 */
 .transition-film::before {
   content: ""; position: absolute; inset: -80%;
   background: repeating-linear-gradient(
@@ -142,16 +147,22 @@ defineExpose({ play });
     transparent 97px,
     transparent 150px
   );
-  background-size: 600px 600px;
   animation: filmMove 3s linear infinite;
 }
+/* 细高光条纹，倾角与 ::before 保持一致（原来 -10deg 与 -12deg 不平行）。 */
 .transition-film::after {
   content: ""; position: absolute; inset: 0;
-  background: repeating-linear-gradient(-10deg, rgba(255, 255, 255, .03) 0, rgba(255, 255, 255, .03) 2px, transparent 2px, transparent 80px);
+  background: repeating-linear-gradient(-12deg, rgba(255, 255, 255, .03) 0, rgba(255, 255, 255, .03) 2px, transparent 2px, transparent 80px);
 }
+/* 条纹周期是 150px，倾角 -12deg。
+   位移必须【正好等于一个周期】，且沿条纹的法线方向，动画循环才能无缝衔接：
+     dx = 150 * sin(12°) ≈ 31.19px
+     dy = 150 * cos(12°) ≈ 146.72px
+   原来的 -160px 0 既不是 150 的整数倍（每循环跳 10px），
+   方向也只动 x 不动 y，与 -12deg 的条纹不垂直，看起来像被横向拖拽。 */
 @keyframes filmMove {
   from { background-position: 0 0; }
-  to { background-position: -160px 0; }
+  to { background-position: -31.19px -146.72px; }
 }
 .film-strip {
   position: absolute; width: 160%; left: -30%;
