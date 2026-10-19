@@ -111,7 +111,12 @@
 
 <script setup>
 import { ref } from 'vue';
-import { IMAGE_POOL, assetUrl } from '../core/imageManifest.js';
+// 【必须】从 config.js 取 IMAGE_POOL，而不是直接从 imageManifest.js 拿原始清单：
+// config.js 的 validatePool() 会校验张数与字段，无效时返回空数组。
+// 绕过它直接取模，等于把这道防线拆掉 —— 空池时 entry 是 undefined，
+// 读 entry.thumb 会抛 TypeError，整页白屏（实测已复现）。
+import { IMAGE_POOL } from '../core/config.js';
+import { assetUrl } from '../core/imageManifest.js';
 
 /**
  * 每列滚动时长（秒）—— 参考站实测值，下标 = 列序号（第 1 列 55s … 第 7 列 52s）。
@@ -129,15 +134,31 @@ const MARQUEE_TEXT =
 /** 序号补零，卡片角标用（NO.07 而不是 NO.7，等宽视觉更整齐）。 */
 const pad2 = (n) => String(n).padStart(2, '0');
 
-// 防御：IMAGE_POOL 若被清空，取模会得到 NaN，整个页面直接崩。兜成 1 至少能渲染。
-const POOL_SIZE = IMAGE_POOL.length || 1;
+const POOL_SIZE = IMAGE_POOL.length;
+
+/**
+ * 单列内的取图步长。
+ *
+ * 【为什么不能写死 7】步长必须与 POOL_SIZE 互质，否则同一列会撞图。
+ * 例如 POOL_SIZE = 21 时，步长 7 走 6 步只会得到 0/7/14/0/7/14 ——
+ * 一列里三张图各重复两遍。清单由 scripts/optimize-images.mjs 生成，
+ * 张数会随照片增减而变，所以这里按 POOL_SIZE 现算一个互质步长。
+ */
+const COLUMN_STEP = (() => {
+  if (!POOL_SIZE) return 1;
+  const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+  let step = 7;
+  while (gcd(step, POOL_SIZE) !== 1) step += 1;
+  return step;
+})();
 
 /**
  * 为一列挑选卡片。
  *
- * 【为什么用步长 7】20 张图、单列最多 6 张，步长 7 与 20 互质，
- * 保证同一列内不会撞图（7 步长走 6 步：0/7/14/1/8/15，两两不同）。
- * 再叠上 columnIndex * 5 的列偏移，避免相邻两列整列重复同一组照片。
+ * 取图公式 (columnIndex * 5 + i * COLUMN_STEP) % POOL_SIZE：
+ *   - COLUMN_STEP 与 POOL_SIZE 互质（见上面的计算），单列内不撞图；
+ *     20 张图时 COLUMN_STEP = 7，一列 6 张得到 0/7/14/1/8/15，两两不同。
+ *   - columnIndex * 5 的列偏移让相邻两列不会整列重复同一组照片。
  *
  * @param {number} columnIndex 列序号，从 0 开始
  * @param {number} count       该列卡片数
@@ -146,7 +167,7 @@ const POOL_SIZE = IMAGE_POOL.length || 1;
 const buildCards = (columnIndex, count) => {
   const cards = [];
   for (let i = 0; i < count; i += 1) {
-    const entry = IMAGE_POOL[(columnIndex * 5 + i * 7) % POOL_SIZE];
+    const entry = IMAGE_POOL[(columnIndex * 5 + i * COLUMN_STEP) % POOL_SIZE];
     cards.push({
       key: 'c' + columnIndex + '-' + i,
       // 【必须】用 assetUrl 拼地址：清单里的 thumb 是不带前导斜杠的相对路径，
@@ -173,7 +194,9 @@ const buildCards = (columnIndex, count) => {
  * 复制份打上 duplicate 标记：alt 置空 + aria-hidden，避免读屏把同样的
  * 30 张照片念两遍。
  */
-const columns = COLUMN_CARD_COUNTS.map((count, columnIndex) => {
+// 空池（清单缺失或校验失败）时不构建任何列：
+// 舞台渲染成空的，跑马灯与骨架照常显示 —— 这是降级，不是崩溃。
+const columns = POOL_SIZE === 0 ? [] : COLUMN_CARD_COUNTS.map((count, columnIndex) => {
   const cards = buildCards(columnIndex, count);
   const track = cards.concat(
     cards.map((card) => ({
