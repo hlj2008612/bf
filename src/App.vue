@@ -38,7 +38,7 @@ const LOGOUT_PATH = '/login';
 
 // 方向表：决定擦除从哪一侧进入（next 从右、prev 从左）。
 // 顺序与导航栏的排列一致，与参考站 ROUTE_ORDER 的作用相同。
-const ROUTE_ORDER = ['/', '/wall', '/cinema', '/music'];
+const ROUTE_ORDER = ['/', '/wall', '/cinema', '/pictorial'];
 
 /**
  * 由起止路径求转场方向。

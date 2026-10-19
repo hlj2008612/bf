@@ -56,7 +56,7 @@ const META = Object.freeze({
   '/': { word: 'HOME', jp: 'ホーム', cn: '首页', no: '01', mark: '◇' },
   '/wall': { word: 'GALLERY', jp: 'ギャラリー', cn: '照片墙', no: '02', mark: '▣' },
   '/cinema': { word: 'CINEMA', jp: 'シアター', cn: '影院模式', no: '03', mark: '▶' },
-  '/music': { word: 'MUSIC', jp: '音楽', cn: '音乐', no: 'EX', mark: '♪' },
+  '/pictorial': { word: 'PICTORIAL', jp: 'ピクトリアル', cn: '画报', no: '04', mark: '◈' },
 });
 
 // 参考站 A 表，逐字

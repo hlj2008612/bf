@@ -27,7 +27,7 @@ public/
 assets-src/images/zmq/  97 MB 原图，【不在】public/ 下，因此不会进 dist/
 src/
   core/                 原生 JS 照片墙引擎（渲染、惯性、输入、状态）
-  views/                PhotoWall / Home / Cinema / Music / Login
+  views/                PhotoWall / Home / Cinema / Pictorial / Login
   components/           NavBar / PtrTransition（ptr 擦除转场覆盖层）
 ```
 

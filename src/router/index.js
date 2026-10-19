@@ -3,7 +3,7 @@ import Login from '../views/Login.vue';
 import Home from '../views/Home.vue';
 import PhotoWall from '../views/PhotoWall.vue';
 import Cinema from '../views/Cinema.vue';
-import Music from '../views/Music.vue';
+import Pictorial from '../views/Pictorial.vue';
 
 const routes = [
   // 登录页：独立页面，不显示导航栏
@@ -15,7 +15,7 @@ const routes = [
   // 其他页面：正常显示导航栏
   { path: '/', name: 'Home', component: Home, meta: { requiresAuth: true } },
   { path: '/cinema', name: 'Cinema', component: Cinema, meta: { requiresAuth: true } },
-  { path: '/music', name: 'Music', component: Music, meta: { requiresAuth: true } }
+  { path: '/pictorial', name: 'Pictorial', component: Pictorial, meta: { requiresAuth: true } }
 ];
 
 const router = createRouter({
