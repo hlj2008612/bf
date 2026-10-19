@@ -63,9 +63,6 @@
                     decoding="async"
                     draggable="false"
                   />
-                  <div class="cinema-card-meta">
-                    <span class="cinema-card-no">NO.{{ card.no }}</span>
-                  </div>
                 </article>
               </div>
             </div>
@@ -175,7 +172,6 @@ const buildCards = (columnIndex, count) => {
       // 这里绝不能写死 /images/thumbnails/x.webp。
       src: assetUrl(entry.thumb),
       alt: '照片 ' + pad2(entry.id),
-      no: pad2(entry.id),
       w: entry.w,
       h: entry.h,
       duplicate: false,
@@ -389,26 +385,10 @@ const isPaused = ref(false);
   transition: transform 0.7s;
 }
 
-.cinema-card-meta {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 8px;
-  background: linear-gradient(to top, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0.6), transparent);
-}
-
-/* 我方没有真实的标题/作者数据（见 CINEMA_SPEC 第 11 条），
-   信息条只放序号，保持与参考站同样的"底部压暗 + 角标"视觉语言。 */
-.cinema-card-no {
-  display: block;
-  font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Consolas, monospace;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-  color: rgba(255, 255, 255, 0.82);
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
-}
+/* 角标（NO.xx）与底部压暗信息条已按需求移除：
+   照片本身就是主体，序号会分散注意力。
+   数据里的 no 字段也一并删掉了，避免留下没人读的死字段；
+   读屏文案仍由 alt 提供（'照片 07' 这种），无障碍信息不受影响。 */
 
 /* ---------------- 悬停 ----------------
    整段包在 (hover: hover) and (pointer: fine) 里：触屏没有真悬停，
