@@ -44,7 +44,7 @@ const navItems = [
   { name: '首页', path: '/', title: 'HOME', color: '#8b6ce8' },
   { name: '照片墙', path: '/wall', title: 'GALLERY', color: '#4a9eff' },
   { name: '影院', path: '/cinema', title: 'CINEMA', color: '#e4bb38' },
-  { name: '音乐', path: '/music', title: 'MUSIC', color: '#eb418d' }
+  { name: '画报', path: '/pictorial', title: 'PICTORIAL', color: '#a3e635' }
 ];
 
 // 计算胶囊宽度和位置（v-for 里的 ref 数组顺序与 navItems 一致）
@@ -167,4 +167,44 @@ const logout = () => {
   display: flex; align-items: center; gap: 6px; transition: all 0.3s;
 }
 .logout-btn:hover { background: rgba(255, 70, 70, 0.2); border-color: rgba(255, 70, 70, 0.5); }
+
+/*
+ * 【修复】窄屏适配。
+ *
+ * 原样式没有任何 @media 断点，实测 375px 视口下：
+ *   .glass-nav 实测宽 388px —— 比视口还宽。原因是全局没有 box-sizing: border-box，
+ *   而 .glass-nav 是 width: 90% + padding: 0 24px + 1px 边框，
+ *   内容盒 337.5px + 内边距 48px + 边框 2px = 388px，横向溢出视口 13px。
+ *   内部可用宽度只剩 337px，装不下 logo + 4 个导航项 + 退出按钮，
+ *   于是中文被逐字折行：logo「✦ 美琴子 ✦」被压成 34x120（4 行），
+ *   导航项被压成 47x76（2~3 行），整个导航条文字变成竖排。
+ *
+ * 桌面端（>=768px）实测 logo 100x24、导航项高 36px，一切正常，
+ * 所以断点取在 768px 以下，桌面样式一个像素都不动。
+ *
+ * box-sizing: border-box 只写在断点内 —— 写进 .glass-nav 基础规则会让
+ * 桌面端宽度从 1202px 变成 1152px（少掉内边距的 50px），那是可见的改动。
+ */
+@media (max-width: 767px) {
+  .glass-nav {
+    box-sizing: border-box;
+    width: 94%; height: 54px; padding: 0 12px; border-radius: 27px;
+  }
+  .nav-left { gap: 10px; min-width: 0; }
+  .logo { font-size: 13px; letter-spacing: 0; white-space: nowrap; }
+  .nav-items { gap: 3px; flex-shrink: 0; }
+  .nav-link { font-size: 12px; padding: 6px 8px; white-space: nowrap; }
+  .nav-right { flex-shrink: 0; }
+  .logout-btn { font-size: 12px; padding: 6px 8px; gap: 4px; white-space: nowrap; }
+}
+
+/* 400px 以下再收紧一档，保证四个导航项 + 退出按钮仍能在一行内放下。 */
+@media (max-width: 400px) {
+  .glass-nav { width: 96%; padding: 0 8px; }
+  .nav-left { gap: 6px; }
+  .logo { font-size: 12px; }
+  .nav-items { gap: 2px; }
+  .nav-link { font-size: 12px; padding: 6px 6px; }
+  .logout-btn { padding: 6px 6px; }
+}
 </style>
