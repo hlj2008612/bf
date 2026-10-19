@@ -124,7 +124,7 @@ const COLUMN_CARD_COUNTS = [6, 4, 4, 4, 4, 4, 4];
 
 /** 跑马灯文案：两段 span 内容必须逐字相同，否则 translateX(-50%) 会露出接缝。 */
 const MARQUEE_TEXT =
-  'GALLERY  •  PHOTO WALL  •  NOW SHOWING  •  写真  •  NIGHT GALLERY  •  夜の写真館  ·  ';
+  '影院模式  •  CINEMA MODE  •  要说漂亮哟~  •  PHOTO WALL  •  NOW PLAYING  •  上映中  ·  ';
 
 /** 序号补零，卡片角标用（NO.07 而不是 NO.7，等宽视觉更整齐）。 */
 const pad2 = (n) => String(n).padStart(2, '0');
@@ -431,11 +431,12 @@ const isPaused = ref(false);
   height: 34px;
   padding: 0;
   border-radius: 50%;
-  border: 1px solid rgba(255, 120, 170, 0.28);
-  background: rgba(26, 6, 18, 0.55);
+  /* 与跑马灯同一套主题色：金边 + 暗暖金底，融入画面而不突兀 */
+  border: 1px solid rgba(228, 187, 56, 0.28);
+  background: rgba(26, 16, 8, 0.55);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  color: rgba(255, 232, 241, 0.9);
+  color: rgba(255, 242, 232, 0.9);
   opacity: 0.55;
   cursor: pointer;
   transition:
@@ -447,8 +448,8 @@ const isPaused = ref(false);
 .cinema-toggle:hover,
 .cinema-toggle:focus-visible {
   opacity: 1;
-  background: rgba(60, 12, 36, 0.8);
-  border-color: rgba(255, 120, 170, 0.6);
+  background: rgba(60, 42, 12, 0.8);
+  border-color: rgba(228, 187, 56, 0.6);
 }
 
 /* 暂停态：照片流与跑马灯一起停（含霓虹闪烁），
@@ -461,24 +462,40 @@ const isPaused = ref(false);
 
 /* ---------------- 霓虹跑马灯 ---------------- */
 .neon-marquee {
+  /*
+    配色走 CSS 变量，不写死具体色值。
+    【为什么】影院页现在是金色主题（呼应导航栏「影院」的 #e4bb38），
+    但音乐页是粉色 #eb418d、首页是紫色 #8b6ce8。若把颜色写死在组件里，
+    复制到其它页面就会变成三份各自维护的硬编码。
+    改为只声明两个变量后，其它页面覆盖 --neon-accent / --neon-accent-rgb
+    即可整体换色，其余派生色（边框、辉光、文字阴影、高光条）自动跟随。
+
+    当前为方案 C「金粉双色」：主体走金色，边框与底部高光掺一点参考站的粉，
+    既有影院的金调，又保留原设计的霓虹层次。
+  */
+  --neon-accent: #e4bb38;
+  --neon-accent-rgb: 228, 187, 56;
+  --neon-pink-rgb: 236, 72, 153;
+
   position: relative;
   box-sizing: border-box;
   width: 100%;
   height: 72px;
   flex: 0 0 72px;
   overflow: hidden;
-  background: linear-gradient(#1a0612, #0f0409 50%, #1a0612);
-  border-top: 1px solid rgba(255, 80, 140, 0.2);
-  border-bottom: 1px solid rgba(255, 80, 140, 0.2);
+  /* 背景由主色派生：极暗的暖金，中间压得更黑以托住文字 */
+  background: linear-gradient(#1a1008, #0f0804 50%, #1a1008);
+  border-top: 1px solid rgba(var(--neon-accent-rgb), 0.24);
+  border-bottom: 1px solid rgba(var(--neon-accent-rgb), 0.24);
   box-shadow:
-    inset 0 0 30px rgba(236, 72, 153, 0.25),
-    0 0 20px rgba(236, 72, 153, 0.15);
+    inset 0 0 30px rgba(var(--neon-accent-rgb), 0.2),
+    0 0 20px rgba(var(--neon-pink-rgb), 0.12);
 }
 
 .neon-marquee-leds {
   position: absolute;
   inset: 0;
-  background-image: radial-gradient(circle, rgba(255, 90, 160, 0.18) 1.2px, transparent 1.5px);
+  background-image: radial-gradient(circle, rgba(255, 200, 120, 0.16) 1.2px, transparent 1.5px);
   background-size: 8px 8px;
   opacity: 0.8;
   mix-blend-mode: screen;
@@ -531,13 +548,18 @@ const isPaused = ref(false);
   font-weight: 800;
   font-size: clamp(22px, 3.2vh, 36px);
   letter-spacing: 0.18em;
-  color: #ffe8f1;
+  color: #fff2e8;
+  /*
+    五层文字阴影 = 霓虹灯的"灯芯 → 内晕 → 中晕 → 外晕 → 环境光"。
+    前三层用暖白/橙保持灯管的实心感，第四层用板块主色，
+    第五层掺粉色作环境光 —— 这是方案 C 的粉金层次。
+  */
   text-shadow:
     0 0 2px #fff,
-    0 0 6px rgba(255, 220, 235, 0.95),
-    0 0 14px rgba(255, 100, 170, 0.85),
-    0 0 28px rgba(236, 72, 153, 0.7),
-    0 0 48px rgba(190, 24, 93, 0.5);
+    0 0 6px rgba(255, 225, 180, 0.95),
+    0 0 14px rgba(255, 170, 110, 0.85),
+    0 0 28px rgba(var(--neon-accent-rgb), 0.65),
+    0 0 48px rgba(var(--neon-pink-rgb), 0.35);
   animation: cinemaNeonFlicker 4.5s ease-in-out infinite;
 }
 
@@ -566,6 +588,7 @@ const isPaused = ref(false);
   }
 }
 
+/* 顶部高光条走主色（金）：中段最亮、两端淡出，模拟灯管正对镜头的那一段 */
 .neon-marquee-highlight-top {
   position: absolute;
   left: 0;
@@ -575,20 +598,26 @@ const isPaused = ref(false);
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(255, 180, 210, 0.5),
-    rgba(255, 180, 210, 0.8),
-    rgba(255, 180, 210, 0.5),
+    rgba(255, 215, 150, 0.5),
+    rgba(255, 215, 150, 0.8),
+    rgba(255, 215, 150, 0.5),
     transparent
   );
 }
 
+/* 底部高光条走粉：与顶部的金形成上下分层，这是方案 C「金粉双色」的点睛处 */
 .neon-marquee-highlight-bottom {
   position: absolute;
   left: 0;
   right: 0;
   height: 1px;
   bottom: 0;
-  background: linear-gradient(90deg, transparent, rgba(190, 24, 93, 0.6), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(var(--neon-pink-rgb), 0.5),
+    transparent
+  );
 }
 
 /* ================================================================
