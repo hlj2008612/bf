@@ -133,29 +133,68 @@ const pad2 = (n) => String(n).padStart(2, '0');
 
 const POOL_SIZE = IMAGE_POOL.length;
 
+/** 最大公约数。判断"某个数是否与 POOL_SIZE 互质"全靠它，也是本次缺陷的数学根因。 */
+const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+
 /**
- * 单列内的取图步长。
+ * 取图步长初值。POOL_SIZE = 20 时它本身就是答案：gcd(9, 20) = 1。
+ * 写成"初值 + while 递增"而不是直接写 9，是因为清单张数会随照片增减而变
+ * （由 scripts/optimize-images.mjs 生成），初值未必对新张数互质。
+ */
+const STEP_SEED = 9;
+
+/** 列偏移初值。POOL_SIZE = 20 时它本身就是答案：gcd(7, 20) = 1 且 7 !== 9。 */
+const OFFSET_SEED = 7;
+
+/**
+ * 单列内的取图步长：从 STEP_SEED 起，往上找第一个与 POOL_SIZE 互质的数。
  *
- * 【为什么不能写死 7】步长必须与 POOL_SIZE 互质，否则同一列会撞图。
- * 例如 POOL_SIZE = 21 时，步长 7 走 6 步只会得到 0/7/14/0/7/14 ——
- * 一列里三张图各重复两遍。清单由 scripts/optimize-images.mjs 生成，
- * 张数会随照片增减而变，所以这里按 POOL_SIZE 现算一个互质步长。
+ * 【为什么必须互质】列内取图是 i * step mod POOL_SIZE。step 与 POOL_SIZE
+ * 不互质时，这个序列的周期是 POOL_SIZE / gcd(step, POOL_SIZE)，一列还没
+ * 走满一整圈就开始撞图。例：POOL_SIZE = 21、step = 7，六张卡只会得到
+ * 0/7/14/0/7/14 —— 三张图各重复两遍。互质时周期 = POOL_SIZE，
+ * 列内连续 count 张两两不同（count <= POOL_SIZE 时）。
  */
 const COLUMN_STEP = (() => {
-  if (!POOL_SIZE) return 1;
-  const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
-  let step = 7;
+  // 空池时 columns 本来就是 []，这个值不会被任何卡片读到；但 while 循环在
+  // POOL_SIZE = 0 时会因 gcd(x, 0) === x 永不收敛，必须先挡掉。
+  if (POOL_SIZE === 0) return 1;
+  let step = STEP_SEED;
   while (gcd(step, POOL_SIZE) !== 1) step += 1;
   return step;
 })();
 
 /**
+ * 列偏移步长：第 c 列的起点是 c * COLUMN_OFFSET mod POOL_SIZE。
+ *
+ * 【为什么必须互质】偏移不互质时，c * offset mod POOL_SIZE 走不满一整圈。
+ * 这正是本次缺陷：旧代码把偏移写死成 5，POOL_SIZE = 20 时 gcd(5, 20) = 5，
+ * 周期只有 20 / 5 = 4 —— 第 1 列与第 5 列、第 2 列与第 6 列起点相同，
+ * 又因为两列步长相同、张数相同，整列内容逐张重合，肉眼就是"同一列照片
+ * 出现了两次"；同时 20 张图只用得到 17 张（编号 4/14/19 从未被取到）。
+ * 互质时周期 = POOL_SIZE，7 列的起点互不相同。
+ *
+ * 【为什么偏移不能等于步长】偏移若等于步长，第 c 列的内容就是第 c-1 列
+ * 沿列内序列平移一格：count 张里 count-1 张重合，仍然会被看成同一串照片。
+ * 偏移与步长取两个不同的互质数，两列的序列才真正错开。
+ */
+const COLUMN_OFFSET = (() => {
+  if (POOL_SIZE === 0) return 0;
+  let offset = OFFSET_SEED;
+  while (gcd(offset, POOL_SIZE) !== 1 || offset === COLUMN_STEP) offset += 1;
+  return offset;
+})();
+
+/**
  * 为一列挑选卡片。
  *
- * 取图公式 (columnIndex * 5 + i * COLUMN_STEP) % POOL_SIZE：
- *   - COLUMN_STEP 与 POOL_SIZE 互质（见上面的计算），单列内不撞图；
- *     20 张图时 COLUMN_STEP = 7，一列 6 张得到 0/7/14/1/8/15，两两不同。
- *   - columnIndex * 5 的列偏移让相邻两列不会整列重复同一组照片。
+ * 取图公式 (columnIndex * COLUMN_OFFSET + i * COLUMN_STEP) % POOL_SIZE：
+ *   - COLUMN_STEP 与 POOL_SIZE 互质 → 列内序列周期 = POOL_SIZE，一列内不撞图。
+ *     POOL_SIZE = 20 时 COLUMN_STEP = 9，一列 6 张得到 0/9/18/7/16/5，两两不同。
+ *   - COLUMN_OFFSET 与 POOL_SIZE 互质 → 列起点 c * COLUMN_OFFSET mod POOL_SIZE
+ *     的周期也是 POOL_SIZE，7 列起点互不相同（20 张时是 0/7/14/1/8/15/2），
+ *     既不会整列重复，20 张图也全部被取到。
+ *   - 两者还必须不相等（理由见 COLUMN_OFFSET 的注释），否则相邻列只差一张。
  *
  * @param {number} columnIndex 列序号，从 0 开始
  * @param {number} count       该列卡片数
@@ -164,7 +203,7 @@ const COLUMN_STEP = (() => {
 const buildCards = (columnIndex, count) => {
   const cards = [];
   for (let i = 0; i < count; i += 1) {
-    const entry = IMAGE_POOL[(columnIndex * 5 + i * COLUMN_STEP) % POOL_SIZE];
+    const entry = IMAGE_POOL[(columnIndex * COLUMN_OFFSET + i * COLUMN_STEP) % POOL_SIZE];
     cards.push({
       key: 'c' + columnIndex + '-' + i,
       // 【必须】用 assetUrl 拼地址：清单里的 thumb 是不带前导斜杠的相对路径，
