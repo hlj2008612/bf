@@ -92,8 +92,12 @@
                     class="card-avatar"
                     :aria-label="'预览照片 ' + padId(card.uid)"
                     :aria-expanded="activeCard && activeCard.uid === card.uid ? 'true' : 'false'"
-                    aria-haspopup="dialog"
+                    aria-haspopup="true"
                     :data-uid="card.uid"
+                    @mouseenter="onAvatarEnter($event, card)"
+                    @mouseleave="onAvatarLeave(false)"
+                    @focus="onAvatarEnter($event, card)"
+                    @blur="onAvatarLeave(true)"
                     @click.stop="togglePreview($event, card)"
                   >
                     <img
@@ -190,23 +194,80 @@
       tabindex="-1"
       :aria-label="'照片 ' + padId(activeCard.uid) + ' 预览'"
       :style="popoverStyle"
+      @mouseenter="onCardEnter"
+      @mouseleave="onAvatarLeave(false)"
       @click.stop
       @animationend="onPopoverAnimEnd"
     >
-      <div class="card-popover-media">
+      <!-- 横幅：参考站 .user-card-banner，纯渐变（我方没有封面图） -->
+      <div class="card-popover-banner" aria-hidden="true"></div>
+
+      <div class="card-popover-body">
+        <!-- 大头像：负上边距压在横幅上 -->
+        <div class="card-popover-ava">
+          <img :src="activeCard.src" alt="" aria-hidden="true" draggable="false" />
+        </div>
+
+        <p class="card-popover-name">美琴</p>
+        <p class="card-popover-bio">写真 NO.{{ padId(activeCard.uid) }} · 画报</p>
+
+        <!-- 统计区：参考站未登录时也是「–」，我方没有真实数据，一律不编造 -->
+        <div class="card-popover-stats">
+          <div class="card-popover-stat"><span class="card-popover-num">–</span><span class="card-popover-lbl">获赞</span></div>
+          <div class="card-popover-stat"><span class="card-popover-num">–</span><span class="card-popover-lbl">粉丝</span></div>
+          <div class="card-popover-stat"><span class="card-popover-num">–</span><span class="card-popover-lbl">帖子</span></div>
+        </div>
+
+        <div class="card-popover-actions">
+          <button type="button" class="card-popover-btn is-primary" @click.stop="openViewerFromCard(activeCard)">查看大图</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
+
+  <!--
+    大图查看层（点资料卡里的「查看大图」打开）。
+
+    【为什么单独一层、不复用资料卡】资料卡是 288x338 的浮层，大图要占大半屏，
+    两者的定位逻辑、遮罩、退出方式完全不同；硬塞进同一个弹层会让
+    computePopoverPosition 同时处理两种形态，改一处坏一处。
+
+    v-if 而不是 v-show：关闭时那张 1600px 的 full 图必须离开 DOM，
+    否则 20 张来回看会在内存里累积。
+  -->
+  <Teleport to="body">
+    <div
+      v-if="viewerCard"
+      ref="viewerRef"
+      class="photo-viewer"
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      :aria-label="'照片 ' + padId(viewerCard.uid) + ' 大图'"
+      @click="onViewerBackdropClick"
+      @keydown.esc.stop="closeViewer"
+    >
+      <figure class="photo-viewer-figure" @click.stop>
         <img
-          :src="activeCard.full"
-          :alt="'照片 ' + padId(activeCard.uid) + ' 大图'"
+          :src="viewerCard.full"
+          :alt="'照片 ' + padId(viewerCard.uid) + ' 大图'"
           decoding="async"
           draggable="false"
-          @load="onPopoverImgLoad"
-          @error="onPopoverImgError"
+          @load="onViewerImgLoad"
+          @error="onViewerImgError"
         />
-      </div>
-      <div class="card-popover-bar">
-        <span class="card-popover-no">NO.{{ padId(activeCard.uid) }}</span>
-        <span class="card-popover-cap">美琴 · 画报</span>
-      </div>
+        <figcaption class="photo-viewer-cap">
+          <span class="photo-viewer-no">NO.{{ padId(viewerCard.uid) }}</span>
+          <span class="photo-viewer-hint">按 Esc 或点击空白关闭</span>
+        </figcaption>
+      </figure>
+
+      <button type="button" class="photo-viewer-close" aria-label="关闭大图" @click.stop="closeViewer">
+        <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <line x1="6" y1="6" x2="18" y2="18" />
+          <line x1="18" y1="6" x2="6" y2="18" />
+        </svg>
+      </button>
     </div>
   </Teleport>
 </template>
@@ -485,6 +546,9 @@ onUnmounted(() => {
   // 弹层：先终止出场定时器，再解绑全局监听，最后清状态。
   // 【顺序不能反】closePreview() 会重新挂一个定时器并再次调 detach，
   // 这里直接走幂等的清理路径，不留任何异步尾巴。
+  clearHoverTimers();   // 悬停弹出/关闭的定时器也必须作废，否则卸载后仍会调 openPreview
+  viewerCard.value = null;      // 大图同样不能留在 DOM 里（1600px 原图）
+  viewerReturnFocus = null;
   clearCloseTimer();
   detachGlobalListeners();
   activeCard.value = null;
@@ -658,6 +722,13 @@ const padId = (id) => String(id).padStart(2, '0');
 /** 当前打开的卡片（null = 关闭）。整个页面同一时刻只有一个。 */
 const activeCard = ref(null);
 /** 弹层 DOM 引用，定位时需要量它自己的尺寸。 */
+
+/** 当前打开的大图（null = 关闭）。与资料卡互斥，同一时刻只显示一个。 */
+const viewerCard = ref(null);
+/** 大图层 DOM 引用（用来接管焦点，Esc 时还原）。 */
+const viewerRef = ref(null);
+/** 打开大图前的焦点元素，关闭时还原，键盘用户不会丢失位置。 */
+let viewerReturnFocus = null;
 const popoverRef = ref(null);
 
 /**
@@ -691,7 +762,6 @@ const POPOVER_GAP = 22;
 const POPOVER_MARGIN = 12;
 /** 参与「是否够放」判断时用的视口最小高度（手机软键盘/小窗会把它压到很小）。 */
 const POPOVER_FALLBACK_VW = 320;
-const POPOVER_FALLBACK_VH = 560;
 
 const clampNum = (v, min, max) => Math.max(min, Math.min(max, v));
 
@@ -705,41 +775,30 @@ const clampNum = (v, min, max) => Math.max(min, Math.min(max, v));
  * @param {object} card 卡片数据（含 fw / fh 原始像素宽高）
  * @returns {{ width:number, height:number }}
  */
-function measurePopoverSize(card) {
+function measurePopoverSize() {
+  /* 头像资料卡是【固定尺寸】的，不像原来按照片比例算高度：
+     banner 96 + 头像上浮 28 + 昵称 25 + 简介 20 + 统计 24+16+16 + 按钮 36+16 + 底部 20
+     ≈ 297，这里保守取 POPOVER_CARD_HEIGHT = 320（实测 320 上下）。
+     只有窄屏（<320px）时宽度会收窄，高度不变。 */
   const vw = typeof window === 'undefined' ? 1440 : window.innerWidth;
-  const vh = typeof window === 'undefined' ? 900 : window.innerHeight;
   const vwOk = vw > 0 ? vw : POPOVER_FALLBACK_VW;
-  const vhOk = vh > 0 ? vh : POPOVER_FALLBACK_VH;
-
-  // 窄屏（<320px）时 288px 会顶出视口，按视口宽度收窄。
   const width = Math.min(288, vwOk - POPOVER_MARGIN * 2);
-  // 长宽比优先用清单里的原图像素；缺失时退回 3:4，绝不按 0 去除。
-  const ratio = card.fw > 0 && card.fh > 0 ? card.fh / card.fw : 4 / 3;
-  const bar = POPOVER_BAR_HEIGHT;
-  // 弹层高度上限：在视口里除了上下各留 POPOVER_MARGIN 之外，
-  // 还要扣掉「视觉上与它冲突的那部分」——
-  //   - 桌面端：固定导航（NavBar top 20 + 高 60 + 10 呼吸 = 90），弹层翻到上方时
-  //     会顶到导航下面，先给它让位；
-  //   - 窄屏（<= 640px，与本文件窄屏断点一致）：导航更扁（88px），
-  //     多扣一点，否则 2 列瀑布流 + 288px 弹层会几乎盖满屏幕。
-  // 这个上限同时是「翻转判定」里用的高度，所以小屏才会出现「上下都放不下 →
-  // 贴边钳制」的兜底路径。
-  const safeTop = vwOk <= 640 ? POPOVER_SAFE_TOP_NARROW : POPOVER_SAFE_TOP;
-  const maxByViewport = vhOk - POPOVER_MARGIN * 2 - safeTop - bar;
-  const maxHeight = Math.max(POPOVER_MIN_IMG_H, Math.round(vhOk * POPOVER_MAX_VH_RATIO) - bar, maxByViewport);
-
-  let height = width * ratio;
-  height = clampNum(height, POPOVER_MIN_IMG_H, maxHeight);
-  return { width, height: height + bar };
+  // 测过一次就用真实高度，首帧仍用保守常量估
+  return { width, height: popoverMeasuredHeight || POPOVER_CARD_HEIGHT };
 }
-/** 弹层底部信息条高度（与 CSS 里 .card-popover-bar 的 padding + 行高一致）。 */
-const POPOVER_BAR_HEIGHT = 44;
-const POPOVER_MIN_IMG_H = 140;
-const POPOVER_MAX_VH_RATIO = 0.7;
+/** 资料卡固定高度（资料卡是固定尺寸，不随图片比例变化）。 */
+const POPOVER_CARD_HEIGHT = 339;   // 资料卡固定高度，真机实测 offsetHeight = 339（旧值 320 偏小 19px）
+/**
+ * 首次渲染后测到的真实高度。0 = 还没测过。
+ * 【为什么不能只用常量】CSS 实测约 332~350px，而常量保守取 320，
+ * 两者差 12~30px 会让 computePopoverPosition 的 spaceBelow/spaceAbove 判断失真：
+ * 判定「下方放得下」但实际渲染出来底部被视口裁掉，最下面的「查看大图」按钮就点不到了。
+ * 弹层是固定尺寸（不随图片比例变化），所以测一次就能一直用。
+ */
+let popoverMeasuredHeight = 0;
+
 /** 顶部固定导航预留高度：NavBar top:20 + height:60 + 10px 呼吸。 */
-const POPOVER_SAFE_TOP = 90;
 /** 窄屏导航的同一预留（NavBar 在小屏更扁，这里按 88px 的页面 padding-top 取）。 */
-const POPOVER_SAFE_TOP_NARROW = 88;
 
 /**
  * 按锚点矩形与弹层尺寸算位置：优先下方，下方放不下就翻到上方；
@@ -785,7 +844,7 @@ function computePopoverPosition(rect, size) {
 function positionPopover() {
   if (!activeCard.value || !popoverAnchor || !popoverAnchor.isConnected) return;
   const rect = popoverAnchor.getBoundingClientRect();
-  Object.assign(popoverState, computePopoverPosition(rect, measurePopoverSize(activeCard.value)));
+  Object.assign(popoverState, computePopoverPosition(rect, measurePopoverSize()));
 }
 
 /** 当前是否处于 reduced-motion：动画要按参考站原值放行，但位移/缩放要去掉。 */
@@ -858,6 +917,7 @@ function attachGlobalListeners() {
   document.addEventListener('keydown', handleDocKeydown);
   window.addEventListener('scroll', handleViewportChange, { passive: true, capture: true });
   window.addEventListener('resize', handleViewportChange, { passive: true });
+  window.addEventListener('mousemove', trackPointer, { passive: true });
 }
 
 function detachGlobalListeners() {
@@ -866,6 +926,7 @@ function detachGlobalListeners() {
   document.removeEventListener('click', handleDocClick, true);
   document.removeEventListener('keydown', handleDocKeydown);
   window.removeEventListener('scroll', handleViewportChange, { capture: true });
+  window.removeEventListener('mousemove', trackPointer);
   window.removeEventListener('resize', handleViewportChange);
 }
 
@@ -910,6 +971,7 @@ function clearCloseTimer() {
  * @param {object} card 卡片数据
  */
 function openPreview(anchor, card) {
+  closeProbeCount = 0;   // 新一轮悬停，重排计数归零
   clearCloseTimer();
   // 顺序：先关掉上一张（动画会走 closing，但新弹层直接替换 ref），再设置新锚点。
   activeCard.value = card;
@@ -919,7 +981,7 @@ function openPreview(anchor, card) {
   // 否则会先以 top:0/left:0 出现在左上角再跳位（一帧可见的错位）。
   Object.assign(popoverState, computePopoverPosition(
     anchor.getBoundingClientRect(),
-    measurePopoverSize(card)
+    measurePopoverSize()
   ));
 
   popoverAnim.value = 'opening';
@@ -930,7 +992,12 @@ function openPreview(anchor, card) {
   // 放在 nextTick 里只做一次，不影响首帧（首帧已经有估算位置，不会闪到左上角）。
   nextTick(() => {
     const el = popoverRef.value;
+    // 缓存真实高度：computePopoverPosition 的翻转判定要用它，否则贴底卡片会被裁
     if (!el || !activeCard.value || !popoverAnchor || popoverAnim.value === 'closing') return;
+    // 判空之后再读尺寸（el 可能已因快速关闭/路由卸载而变 null）
+    // 用 offsetHeight 而不是 getBoundingClientRect().height：入场动画从 scale(0.95) 起步，
+    // 此刻 rect 只有 322 而布局高度已是 339，用 rect 会把高度永久记小 17px。
+    if (el.offsetHeight > 0) popoverMeasuredHeight = el.offsetHeight;
     const rect = popoverAnchor.getBoundingClientRect();
     Object.assign(popoverState, computePopoverPosition(rect, {
       width: el.offsetWidth,
@@ -942,6 +1009,7 @@ function openPreview(anchor, card) {
 /** 关闭弹层：先播 200ms 出场动画，再卸载 DOM 并解绑全局事件。 */
 function closePreview() {
   if (!activeCard.value) return;
+  clearHoverTimers();  // 关闭时作废在途的悬停定时器，避免它把弹层重新打开
   const anim = prefersReducedMotion() ? 0 : POPOVER_DURATION;
   popoverAnim.value = 'closing';
   detachGlobalListeners();
@@ -951,6 +1019,7 @@ function closePreview() {
     activeCard.value = null;
     popoverAnim.value = 'idle';
     popoverAnchor = null;
+    hoverAnchorEl = null;
   }, anim);
 }
 
@@ -958,6 +1027,207 @@ function closePreview() {
  * 头像点击：同一张卡再点一次 = 关闭；点另一张 = 切换（旧的先关）。
  * stopPropagation 防止触发卡片的其它点击行为，也防止 document 监听误判。
  */
+/**
+ * 悬停弹出资料卡（参考站是 HoverCard）
+ * ----------------------------------------------------------------
+ * 【为什么不用纯 CSS :hover】弹层 Teleport 到了 body，与头像不是父子关系，
+ * CSS 选择器够不着；而且鼠标从头像移向弹层时要留出跨越空隙的时间，
+ * 否则指针穿过 4~6px 的空档弹层就没了，用户根本点不到里面的按钮。
+ * 所以用「进入延迟 + 离开宽限」两个定时器来模拟 HoverCard 的安全区。
+ *
+ * 参考站实测：移入后约 276ms 出现。这里取 180ms —— 比参考站快一点，
+ * 因为我们的弹层只是照片信息，不像参考站要拉用户数据。
+ */
+const AVATAR_OPEN_DELAY = 180;   // 移入后多久弹出
+const AVATAR_CLOSE_DELAY = 220;  // 移出后多久关闭（留出移到弹层上的时间）
+
+let hoverOpenTimer = 0;
+let hoverCloseTimer = 0;
+
+/** 当前资料卡的头像按钮（用来在关闭前判断指针是否还在头像附近）。 */
+let hoverAnchorEl = null;
+/** 最近一次指针位置，关闭前用它判断指针是否还在头像与弹层之间的空隙里。 */
+let lastPointerX = 0;
+let lastPointerY = 0;
+/**
+ * 是否真的收到过指针位置。
+ * 【为什么需要】lastPointerX/Y 的初值是 0,0，而 inRect 有 8px 容差，
+ * 于是「从未移动过指针」时，视口左上角 (-8..8) 会被误判成「指针还在头像里」，
+ * 弹层就永远关不掉。触屏（只 tap 不 move）和纯键盘操作都会踩到。
+ * 未知位置 = 按「已离开」处理，与 mouseleave 的直觉一致。
+ */
+let pointerKnown = false;
+
+/**
+ * 本轮「指针夹在头像与弹层之间」的重排次数。
+ * 【为什么要有上限】若只按「指针还在空隙里」无限重排，指针停在缝隙中不动时
+ * 定时器会永远每 220ms 重排一次（真机实测静止 3 秒创建 14 次），
+ * 每次重排都是一次完整的再判定。上限 = 1 次首次判定 + CLOSE_PROBE_MAX 次重排 = 6 次 ≈ 1.4 秒
+ * （实测验收：静止在空隙 3 秒内共创建 6 个 220ms 定时器，约 1.4 秒后自动关闭），之后强制关闭。
+ */
+let closeProbeCount = 0;
+const CLOSE_PROBE_MAX = 5;
+
+function clearHoverTimers() {
+  if (hoverOpenTimer) { clearTimeout(hoverOpenTimer); hoverOpenTimer = 0; }
+  if (hoverCloseTimer) { clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; }
+}
+
+/** 指针进入头像（或键盘 focus）：延迟弹出。 */
+function onAvatarEnter(e, card) {
+  clearHoverTimers();
+  const anchor = e && e.currentTarget;
+  hoverAnchorEl = anchor;   // 关闭前要用它判断指针是否还在头像附近
+  // 已经在显示同一张，不用重开（避免从弹层移回头像时反复重播入场动画）
+  if (activeCard.value && activeCard.value.uid === card.uid) return;
+  hoverOpenTimer = setTimeout(() => {
+    hoverOpenTimer = 0;
+    clearCloseTimer();
+    openPreview(anchor, card);
+  }, AVATAR_OPEN_DELAY);
+}
+
+/** 指针进入弹层本体：取消关闭倒计时（安全区）。 */
+function onCardEnter() {
+  if (hoverCloseTimer) { clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; }
+  if (hoverOpenTimer) { clearTimeout(hoverOpenTimer); hoverOpenTimer = 0; }
+}
+
+/**
+ * 指针离开头像或弹层：宽限后关闭。
+ *
+ * 【viaBlur 的意义】键盘用户 Tab 过一张卡时，焦点会移走触发 blur，
+ * 但他们没法把指针移进弹层去接住，安全区对他们不存在。
+ * 若 blur 也走 220ms 延迟关闭，键盘用户看到的只是弹层一闪而过。
+ * 所以 blur 走独立分支：只在焦点既不在头像也不在弹层里时才关。
+ */
+function onAvatarLeave(viaBlur = false) {
+  // 只认严格的 true：@mouseleave="onAvatarLeave" 这种写法会把 MouseEvent
+  // 当参数传进来，事件对象是 truthy，会被误判成 blur 分支（本轮真踩过）。
+  const isBlur = viaBlur === true;
+  if (hoverOpenTimer) { clearTimeout(hoverOpenTimer); hoverOpenTimer = 0; }
+  if (hoverCloseTimer) { clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; }
+
+  if (isBlur) {
+    // 焦点从头像移到别处（但不是移进弹层）：立即关。
+    // 若焦点是移进弹层内部（Tab 到按钮），保持打开。
+    setTimeout(() => {
+      const pop = popoverRef.value;
+      const focused = document.activeElement;
+      if (pop && focused && pop.contains(focused)) return;
+      closePreview();
+    }, 0);
+    return;
+  }
+
+  hoverCloseTimer = setTimeout(() => {
+    hoverCloseTimer = 0;
+    maybeCloseByPointer();
+  }, AVATAR_CLOSE_DELAY);
+}
+
+/**
+ * 关闭倒计时到点时的最后一道判断：指针是不是真的离开了？
+ *
+ * 【为什么不能只靠 mouseleave】头像与弹层之间有 POPOVER_GAP(22px) 的空隙。
+ * 鼠标逐点移动时，中间那几帧会命中卡片背景，于是先触发头像的 mouseleave；
+ * 如果直接信它，用户还没碰到弹层就已经开始倒计时，指针稍慢一点弹层就没了。
+ * 真机实测：16px 间隙、3 次 mouse.move 后弹层在 y=480 就消失了（弹层从 y=484 才开始）。
+ *
+ * 所以这里用真实指针坐标再判一次：只要指针还在「头像矩形」或「弹层矩形」里
+ * （含 8px 容差，覆盖亚像素与鼠标抖动），就不关，并重新排一次倒计时继续观察。
+ */
+function maybeCloseByPointer() {
+  if (!activeCard.value) return;
+
+  // 从未收到过指针位置：按「已离开」处理（见 pointerKnown 注释）
+  if (!pointerKnown) {
+    closePreview();
+    return;
+  }
+
+  const pad = 8;
+  const inRect = (r, x, y) => r && x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad;
+
+  const pop = popoverRef.value;
+  if (pop && inRect(pop.getBoundingClientRect(), lastPointerX, lastPointerY)) {
+    closeProbeCount = 0;
+    return;
+  }
+  if (hoverAnchorEl && hoverAnchorEl.isConnected && inRect(hoverAnchorEl.getBoundingClientRect(), lastPointerX, lastPointerY)) {
+    closeProbeCount = 0;
+    return;
+  }
+
+  // 指针还在两个矩形之间（垂直方向夹在中间、水平方向落在弹层宽度内）视为在空隙里
+  if (pop && hoverAnchorEl && hoverAnchorEl.isConnected) {
+    const pr = pop.getBoundingClientRect();
+    const ar = hoverAnchorEl.getBoundingClientRect();
+    const betweenY = lastPointerY >= Math.min(ar.bottom, pr.top) - pad && lastPointerY <= Math.max(ar.bottom, pr.top) + pad;
+    const inX = lastPointerX >= Math.min(pr.left, ar.left) - pad && lastPointerX <= Math.max(pr.right, ar.right) + pad;
+    if (betweenY && inX && closeProbeCount < CLOSE_PROBE_MAX) {
+      // 还在穿越空隙：再等一个宽限周期重新判（次数有上限，见 CLOSE_PROBE_MAX）
+      closeProbeCount++;
+      hoverCloseTimer = setTimeout(() => {
+        hoverCloseTimer = 0;
+        maybeCloseByPointer();
+      }, AVATAR_CLOSE_DELAY);
+      return;
+    }
+  }
+
+  closeProbeCount = 0;
+  closePreview();
+}
+/** 全局记录指针位置（只在资料卡打开期间需要，开销极小）。 */
+function trackPointer(e) {
+  pointerKnown = true;
+  lastPointerX = e.clientX;
+  lastPointerY = e.clientY;
+}
+
+/**
+ * 资料卡里的「查看大图」：关闭资料卡，打开全屏大图。
+ *
+ * 【为什么必须先关掉资料卡】两者都是 position:fixed 的浮层，同时存在会叠在
+ * 一起，而且资料卡的「点外部关闭」监听会把大图上的点击误判成外部点击。
+ */
+function openViewerFromCard(card) {
+  clearHoverTimers();
+  closePreview();
+  openViewer(card);
+}
+
+/** 打开大图。记录来源焦点，关闭时还原。 */
+function openViewer(card) {
+  if (!card) return;
+  viewerReturnFocus = document.activeElement;
+  viewerCard.value = card;
+  nextTick(() => {
+    if (viewerRef.value) viewerRef.value.focus();
+  });
+}
+
+/** 关闭大图。 */
+function closeViewer() {
+  const back = viewerReturnFocus;
+  viewerReturnFocus = null;
+  viewerCard.value = null;
+  if (back && typeof back.focus === 'function' && back.isConnected) back.focus();
+}
+
+/** 点遮罩关闭（只有点在层本身、不是点在图片或按钮上时才关）。 */
+function onViewerBackdropClick(e) {
+  if (e.target === e.currentTarget) closeViewer();
+}
+
+const onViewerImgLoad = () => {};
+const onViewerImgError = () => {
+  /* 大图 404 时浏览器会显示裂图。这里不额外处理：
+     full/ 与 thumbnails/ 同一批生成，失败只可能是部署漏了 public/images/full，
+     显示裂图反而比静默消失更容易被发现问题。 */
+};
+
 function togglePreview(e, card) {
   if (e && typeof e.stopPropagation === 'function') e.stopPropagation();
   const anchor = e && e.currentTarget;
@@ -987,11 +1257,6 @@ const onPopoverAnimEnd = (e) => {
  *   - 失败：不显示破图。记录一次并在弹层里给出降级文案 —— 但本项目 full/
  *     与 thumbnails/ 同一批生成，失败通常意味着部署漏了 public/images/full。
  */
-const onPopoverImgLoad = () => { positionPopover(); };
-const onPopoverImgError = () => {
-  const el = popoverRef.value;
-  if (el) el.classList.add('is-broken');
-};
 
 /** 出场动画时长（ms），与 CSS 的 200ms 保持一致。 */
 const POPOVER_DURATION = 200;
@@ -1001,6 +1266,115 @@ columns.value = assignColumns(columnCount.value);
 </script>
 
 <style scoped>
+
+/* ================================================================
+   大图查看层
+   ----------------------------------------------------------------
+   没有照参考站做横向 carousel + 信息面板：本项目的每张照片是独立的，
+   不是一篇文章的多图，所以只做「看这一张」的语义，配 ESC / 点空白关闭。
+   ================================================================ */
+.photo-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  box-sizing: border-box;
+  background: rgba(8, 8, 12, 0.82);
+  backdrop-filter: blur(15px) saturate(1.2);
+  animation: viewerFadeIn 220ms ease both;
+  cursor: zoom-out;
+}
+
+.photo-viewer:focus {
+  outline: none;
+}
+
+.photo-viewer-figure {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  max-height: 100%;
+  cursor: default;
+  animation: viewerZoomIn 260ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+/* 图片自适应：宽高都不超过可视区的 78vh / 100%，保持原始比例。
+   object-fit: contain 是必须的 —— 1600px 的长图在矮屏下要缩到能完整看见，
+   cover 会把两侧裁掉。 */
+.photo-viewer-figure img {
+  display: block;
+  max-width: 100%;
+  max-height: 78vh;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  border-radius: 12px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.photo-viewer-cap {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.6);
+}
+
+.photo-viewer-no {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  font-variant-numeric: tabular-nums;
+  color: #a3e635;
+}
+
+.photo-viewer-hint {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+.photo-viewer-close {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border-radius: 9999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(20, 20, 28, 0.7);
+  color: rgba(255, 255, 255, 0.85);
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.photo-viewer-close:hover {
+  background: rgba(40, 40, 52, 0.9);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.photo-viewer-close:focus-visible {
+  outline: 2px solid #a3e635;
+  outline-offset: 2px;
+}
+
+@keyframes viewerFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes viewerZoomIn {
+  from { opacity: 0; transform: scale(0.94); }
+  to { opacity: 1; transform: scale(1); }
+}
+
 /* ================================================================
    画报页样式
    ----------------------------------------------------------------
@@ -1507,6 +1881,8 @@ columns.value = assignColumns(columnCount.value);
 }
 
 /*
+
+/*
  * 入场 / 出场：两个 keyframes 覆盖同一组属性，用 animation-direction /
  * animation-name 切换，而不是「入场写一套、出场写另一套反向值」——
  * 后者在动画被打断（打开后立刻关闭）时会把元素闪回初始态。
@@ -1584,75 +1960,125 @@ columns.value = assignColumns(columnCount.value);
   }
 }
 
-/* ---------------- 图片区（本项目内容） ----------------
-   参考站这里是用户资料，本项目是一张照片。
-   图片高度由脚本按原图比例算好后以内联 height 写回（见 measurePopoverSize），
-   所以这里只需要 object-fit: cover 兜住「真实比例与清单微差」的那几像素。 */
-.card-popover-media {
-  position: relative;
-  width: 100%;
-  background: rgba(0, 0, 0, 0.35);
-  overflow: hidden;
+/* ---------------- 头像资料卡（参考站 HoverCard 同构） ----------------
+   结构：banner 渐变横幅 -> 负上边距的大头像 -> 昵称 / 简介 -> 三列统计 -> 主按钮。
+   数值逐项照参考站 .glass-user-card 的计算样式抄（主理人真 Chrome 读回），
+   只有「统计数字」故意保持「–」—— 本项目没有真实互动数据，不伪造。 */
+.card-popover-banner {
+  height: 96px;
+  background-image: linear-gradient(to right bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05), rgba(0, 0, 0, 0));
+  flex: none;
 }
 
-.card-popover-media img {
+.card-popover-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0 20px 20px;
+}
+
+/* 头像上浮压住横幅。负 margin 用 -36px（64/2 + 4），与参考站 -mt-9 观感一致。
+   box-sizing 必须 border-box，否则 3px 边框会把 64x64 撑成 70x70。 */
+.card-popover-ava {
+  box-sizing: border-box;
+  width: 64px;
+  height: 64px;
+  margin-top: -36px;
+  border-radius: 9999px;
+  border: 3px solid rgba(255, 255, 255, 0.25);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  flex: none;
+}
+
+.card-popover-ava img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
-  /* 大图多半还在下载：给一个极轻的模糊占位，加载完自然清晰，
-     比空白框好看，也不会像骨架屏那样抢注意力 */
-  background: rgba(255, 255, 255, 0.04);
 }
 
-/* 大图 404（部署漏了 public/images/full）时不要让浏览器显示裂图图标 */
-.card-popover.is-broken .card-popover-media {
-  min-height: 160px;
+.card-popover-name {
+  margin: 12px 0 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 25px;
+  color: #fff;
 }
 
-.card-popover.is-broken .card-popover-media::after {
-  content: '大图加载失败';
-  position: absolute;
-  inset: 0;
+.card-popover-bio {
+  margin: 4px 0 0;
+  min-height: 20px;
+  font-size: 14px;
+  line-height: 20px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+/* 三列统计：数字大、标签小，数字用 tabular-nums 保证「–」也等宽。 */
+.card-popover-stats {
   display: grid;
-  place-items: center;
-  font-size: 13px;
-  color: rgba(255, 255, 255, 0.55);
-  background: rgba(20, 20, 28, 0.9);
-}
-
-.card-popover.is-broken .card-popover-media img {
-  visibility: hidden;
-}
-
-/* ---------------- 底部信息条 ----------------
-   只放「照片编号 + 作者」，不伪造点赞/评论/浏览数。
-   高度在脚本里是 POPOVER_BAR_HEIGHT = 44，改这里的 padding 要同步改那个常量。 */
-.card-popover-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
-  box-sizing: border-box;
-  height: 44px;
-  padding: 0 12px;
+  margin-top: 16px;
+  padding-top: 16px;
   border-top: 1px solid rgba(255, 255, 255, 0.1);
 }
 
-.card-popover-no {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  font-variant-numeric: tabular-nums;
-  color: #a3e635;
+.card-popover-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  min-width: 0;
 }
 
-.card-popover-cap {
+.card-popover-num {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 24px;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-popover-lbl {
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.55);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 16px;
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.card-popover-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.card-popover-btn {
+  flex: 1 1 0;
+  box-sizing: border-box;
+  padding: 10px 0;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.2s ease, background-color 0.2s ease;
+}
+
+/* 主按钮用画报页的青柠主题色 #a3e635（= rgb(163,230,53)），与参考站同色。 */
+.card-popover-btn.is-primary {
+  background-color: rgb(163, 230, 53);
+  color: #000;
+  box-shadow: 0 4px 18px rgba(163, 230, 53, 0.25);
+}
+
+.card-popover-btn.is-primary:hover {
+  filter: brightness(1.08);
+}
+
+.card-popover-btn.is-primary:focus-visible {
+  outline: 2px solid rgba(163, 230, 53, 0.9);
+  outline-offset: 2px;
 }
 
 /* 弹层本身被程序化聚焦时（tabindex=-1）不要描边：
