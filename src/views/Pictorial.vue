@@ -1058,11 +1058,15 @@ function closePreview() {
  * 否则指针穿过 4~6px 的空档弹层就没了，用户根本点不到里面的按钮。
  * 所以用「进入延迟 + 离开宽限」两个定时器来模拟 HoverCard 的安全区。
  *
- * 参考站实测：移入后约 276ms 出现。这里取 180ms —— 比参考站快一点，
- * 因为我们的弹层只是照片信息，不像参考站要拉用户数据。
+ * 【触发区】参考站实测只在「头像 + 作者名」这一块触发，不是整张卡片
+ *（悬停卡片图片区 360,200 实测为 closed，悬停头像 347,409 为 open）。
+ * 我方同样只绑在 .card-avatar 上，刻意不扩大到整卡：
+ * 整卡悬停会让指针移向弹层的路径变短、更容易在空隙里超时，反而降低可用性。
+ * 参考站实测：移入后约 255ms 出现、移出后约 224ms 关闭（Radix HoverCard 默认 700/300，
+ * 参考站显式覆盖了这两个默认值）。我们照实测值取 255/224，让手感与参考站一致。
  */
-const AVATAR_OPEN_DELAY = 180;   // 移入后多久弹出
-const AVATAR_CLOSE_DELAY = 220;  // 移出后多久关闭（留出移到弹层上的时间）
+const AVATAR_OPEN_DELAY = 255;   // 移入后多久弹出（参考站实测 255ms）
+const AVATAR_CLOSE_DELAY = 224;  // 移出后多久关闭（参考站实测 224ms，留出移到弹层上的时间）
 
 let hoverOpenTimer = 0;
 let hoverCloseTimer = 0;
@@ -1185,14 +1189,22 @@ function maybeCloseByPointer() {
     return;
   }
 
-  // 指针还在两个矩形之间（垂直方向夹在中间、水平方向落在弹层宽度内）视为在空隙里
+  // 指针还在「卡片 ↔ 弹层」之间时，视为正在穿越，不算离开。
+  // 【为什么用凸包而不是只判垂直条带】弹层紧贴头像右侧渲染（实测弹层 x=46~366、
+  // 头像 x=49~89，两者横向几乎重叠），指针从卡片任意位置斜向移进弹层时，
+  // 中间帧可能落在卡片的左下方或右上方，只判「头像与弹层之间的垂直条带」会漏掉这些点，
+  // 于是还没走到弹层就倒计时到点（这是本轮实测到的关闭过早问题）。
+  // 凸包（外接矩形）能覆盖卡片与弹层之间的全部过渡区域，且两个矩形之外的任意一点必然已离开。
   if (pop && hoverAnchorEl && hoverAnchorEl.isConnected) {
     const pr = pop.getBoundingClientRect();
     const ar = hoverAnchorEl.getBoundingClientRect();
-    const betweenY = lastPointerY >= Math.min(ar.bottom, pr.top) - pad && lastPointerY <= Math.max(ar.bottom, pr.top) + pad;
-    const inX = lastPointerX >= Math.min(pr.left, ar.left) - pad && lastPointerX <= Math.max(pr.right, ar.right) + pad;
-    if (betweenY && inX && closeProbeCount < CLOSE_PROBE_MAX) {
-      // 还在穿越空隙：再等一个宽限周期重新判（次数有上限，见 CLOSE_PROBE_MAX）
+    const hull = {
+      left: Math.min(pr.left, ar.left),
+      right: Math.max(pr.right, ar.right),
+      top: Math.min(pr.top, ar.top),
+      bottom: Math.max(pr.bottom, ar.bottom),
+    };
+    if (inRect(hull, lastPointerX, lastPointerY) && closeProbeCount < CLOSE_PROBE_MAX) {
       closeProbeCount++;
       hoverCloseTimer = setTimeout(() => {
         hoverCloseTimer = 0;
@@ -1283,8 +1295,8 @@ const onPopoverAnimEnd = (e) => {
  *     与 thumbnails/ 同一批生成，失败通常意味着部署漏了 public/images/full。
  */
 
-/** 出场动画时长（ms），与 CSS 的 200ms 保持一致。 */
-const POPOVER_DURATION = 200;
+/** 出场动画时长（ms），与 CSS 的 300ms 保持一致。 */
+const POPOVER_DURATION = 300;
 
 // 首屏同步布局：在 setup 阶段就把列填好，模板第一次渲染即有卡片。
 columns.value = assignColumns(columnCount.value);
@@ -1914,7 +1926,7 @@ columns.value = assignColumns(columnCount.value);
  * 项目里已有 ptr-*（main.css）与 cinema*（Cinema.vue）。
  */
 .card-popover.is-open {
-  animation: cardPopoverIn 200ms cubic-bezier(0.23, 1, 0.32, 1) both;
+            animation: cardPopoverIn 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .card-popover.is-closing {
