@@ -199,28 +199,37 @@
       @click.stop
       @animationend="onPopoverAnimEnd"
     >
-      <!-- 横幅：参考站 .user-card-banner，纯渐变（我方没有封面图） -->
-      <div class="card-popover-banner" aria-hidden="true"></div>
+      <!--
+        悬停预览：直接显示这张卡对应的照片本身（1600px 版）。
 
-      <div class="card-popover-body">
-        <!-- 大头像：负上边距压在横幅上 -->
-        <div class="card-popover-ava">
-          <img :src="activeCard.src" alt="" aria-hidden="true" draggable="false" />
-        </div>
+        【为什么用 full 而不是 src】src 是缩略图（最长边 560px），放大到 320px 宽的浮层里
+        还算清楚，但用户接下来多半想看细节。full 是同一张图的 1600px 版，
+        20 张合计 2.55 MB 且只在悬停时按需加载一张，代价可接受。
 
-        <p class="card-popover-name">美琴</p>
-        <p class="card-popover-bio">写真 NO.{{ padId(activeCard.uid) }} · 画报</p>
-
-        <!-- 统计区：参考站未登录时也是「–」，我方没有真实数据，一律不编造 -->
-        <div class="card-popover-stats">
-          <div class="card-popover-stat"><span class="card-popover-num">–</span><span class="card-popover-lbl">获赞</span></div>
-          <div class="card-popover-stat"><span class="card-popover-num">–</span><span class="card-popover-lbl">粉丝</span></div>
-          <div class="card-popover-stat"><span class="card-popover-num">–</span><span class="card-popover-lbl">帖子</span></div>
-        </div>
-
-        <div class="card-popover-actions">
-          <button type="button" class="card-popover-btn is-primary" @click.stop="openViewerFromCard(activeCard)">查看大图</button>
-        </div>
+        【尺寸由宽高比决定】外层 .card-popover-photo 的 aspect-ratio 用 fw/fh 内联写死，
+        这样图片进 DOM 之前浮层就已经占好正确高度，computePopoverPosition 不会先按
+        一个错误高度判「放得下」再被撑开 —— 这是上一版资料卡用固定高度 339 的原因，
+        照片形态必须改成按比例算。
+      -->
+      <div
+        class="card-popover-photo"
+        :style="{ aspectRatio: activeCard.fw + ' / ' + activeCard.fh }"
+      >
+        <img
+          :src="activeCard.full"
+          :alt="'照片 ' + padId(activeCard.uid) + ' 预览'"
+          decoding="async"
+          draggable="false"
+        />
+        <span class="card-popover-no">NO.{{ padId(activeCard.uid) }}</span>
+      </div>
+      <div class="card-popover-foot">
+        <span class="card-popover-hint">点击查看大图 · 移开自动关闭</span>
+        <button
+          type="button"
+          class="card-popover-btn is-primary"
+          @click.stop="openViewerFromCard(activeCard)"
+        >查看大图</button>
       </div>
     </div>
   </Teleport>
@@ -761,42 +770,56 @@ const POPOVER_MARGIN = 12;
 /** 参与「是否够放」判断时用的视口最小高度（手机软键盘/小窗会把它压到很小）。 */
 const POPOVER_FALLBACK_VW = 320;
 
-const clampNum = (v, min, max) => Math.max(min, Math.min(max, v));
+/**
+ * 悬停预览的照片显示宽度（px）。与 CSS 里 .card-popover 的 width 必须一致，
+ * 否则 measurePopoverSize() 算出的宽度和实际渲染宽度对不上，横向定位会偏。
+ */
+const POPOVER_PHOTO_WIDTH = 320;
+/**
+ * 弹层底部信息条的高度（px）。必须与 CSS 里 .card-popover-foot 的 height 一致，
+ * 否则算出的总高比实际少这一截，翻到锚点上方时会压到锚点上。
+ */
+const POPOVER_FOOT_HEIGHT = 52;
 
-/** 资料卡固定高度（资料卡是固定尺寸，不随图片比例变化）。 */
-const POPOVER_CARD_HEIGHT = 339;   // 资料卡固定高度，真机实测 offsetHeight = 339（旧值 320 偏小 19px）
+const clampNum = (v, min, max) => Math.max(min, Math.min(max, v));
 
 /**
  * 首次渲染后测到的真实高度。0 = 还没测过。
  * 【为什么不能只用常量】入场动画会改变 rect，且浏览器缩放/字体设置会让高度浮动；
  * 偏差会让 computePopoverPosition 的 spaceBelow/spaceAbove 判断失真：
  * 判定「下方放得下」但实际渲染出来底部被视口裁掉，最下面的「查看大图」按钮就点不到了。
- * 弹层是固定尺寸（不随图片比例变化），所以测一次就能一直用。
+ * 【现在高度随图变化】所以缓存只对「当前这一张」有效，换卡时必须在 openPreview 里清零，
+ * 否则上一张的实测高度会套到下一张，定位仍然错。
  */
 let popoverMeasuredHeight = 0;
 
 /**
- * 量资料卡的显示尺寸（固定尺寸，不按照片比例变化）。
+ * 量悬停预览的显示尺寸：宽度固定，高度 = 照片宽度 / 这张图的宽高比 + 信息条。
  *
- * 定位（尤其是「放得下吗 / 要不要翻到上方」）需要在弹层渲染前就知道它的高度。
- * 这里在 JS 里用同一套规则算出来，再作为内联宽高写回去，CSS 与 JS 只有一个真相。
+ * 【为什么必须在渲染前算出来】computePopoverPosition 要用高度判断「下方放不放得下」，
+ * 否则得先渲染一次、量完再摆，第一帧会闪一下。
+ * 照片高度由 activeCard 的 fw/fh 决定，所以每张图算出来都不一样。
  *
  * @returns {{ width:number, height:number }}
  */
 function measurePopoverSize() {
-  /* 头像资料卡是【固定尺寸】的，不像原来按照片比例算高度：
-     banner 96 + 头像上浮 28 + 昵称 25 + 简介 20 + 统计 24+16+16 + 按钮 36+16 + 底部 20
-     ≈ 297。真机实测 offsetHeight = 339（含内边距与边框），常量取实测值。
-     只有窄屏（<320px）时宽度会收窄，高度不变。 */
   const vw = typeof window === 'undefined' ? 1440 : window.innerWidth;
   const vwOk = vw > 0 ? vw : POPOVER_FALLBACK_VW;
-  const width = Math.min(288, vwOk - POPOVER_MARGIN * 2);
-  // 测过一次就用真实高度，首帧仍用保守常量估
-  return { width, height: popoverMeasuredHeight || POPOVER_CARD_HEIGHT };
+  // 与 CSS 里 @media (max-width:640px) 的 width: calc(100vw - 24px) 用同一公式。
+  // Math.max(0, ...)：视口极窄时别算出负数宽度，否则定位会翻到屏幕外。
+  const width = Math.max(0, Math.min(POPOVER_PHOTO_WIDTH, vwOk - POPOVER_MARGIN * 2));
+
+  const card = activeCard.value;
+  // 宽高比缺失或非法时退回 3:4（项目图片都是竖构图，比 1:1 更接近真实高度），
+  // 避免 0 或 NaN 让整个浮层高度变成 0、定位算到视口外。
+  const ratio = card && card.fw > 0 && card.fh > 0 ? card.fw / card.fh : 3 / 4;
+
+  // 高度优先用实测值（openPreview 的 nextTick 里量 offsetHeight）；没测过时按
+  // border-box 估算：照片占 (width - 2px 边框) + 信息条，偏差 ≤3px，随后被实测覆盖。
+  const height = popoverMeasuredHeight || Math.round((width - 2) / ratio + POPOVER_FOOT_HEIGHT + 2);
+  return { width, height };
 }
 
-/** 顶部固定导航预留高度：NavBar top:20 + height:60 + 10px 呼吸。 */
-/** 窄屏导航的同一预留（NavBar 在小屏更扁，这里按 88px 的页面 padding-top 取）。 */
 
 /**
  * 按锚点矩形与弹层尺寸算位置：优先下方，下方放不下就翻到上方；
@@ -970,6 +993,8 @@ function clearCloseTimer() {
  */
 function openPreview(anchor, card) {
   closeProbeCount = 0;   // 新一轮悬停，重排计数归零
+  // 每张图高度不同：上一张的实测高度绝不能套到这一张，否则定位会按错误的尺寸算
+  popoverMeasuredHeight = 0;
   clearCloseTimer();
   // 顺序：先关掉上一张（动画会走 closing，但新弹层直接替换 ref），再设置新锚点。
   activeCard.value = card;
@@ -1860,11 +1885,11 @@ columns.value = assignColumns(columnCount.value);
    所以这段 scoped 样式对 body 下的弹层同样生效，不需要全局样式。
    ================================================================ */
 .card-popover {
-  /* 盒子模型：宽 288 是【含边框】的总宽，与参考站的实测一致 */
+  /* 盒子模型：宽 320 是【含边框】的总宽，与脚本里的 POPOVER_PHOTO_WIDTH 一致 */
   box-sizing: border-box;
   position: fixed;
   z-index: 2000;
-  width: 288px;
+  width: 320px;
   border-radius: 16px;
   background: rgba(20, 20, 28, 0.55);
   border: 1px solid rgba(255, 255, 255, 0.15);
@@ -1958,96 +1983,70 @@ columns.value = assignColumns(columnCount.value);
   }
 }
 
-/* ---------------- 头像资料卡（参考站 HoverCard 同构） ----------------
-   结构：banner 渐变横幅 -> 负上边距的大头像 -> 昵称 / 简介 -> 三列统计 -> 主按钮。
-   数值逐项照参考站 .glass-user-card 的计算样式抄（主理人真 Chrome 读回），
-   只有「统计数字」故意保持「–」—— 本项目没有真实互动数据，不伪造。 */
-.card-popover-banner {
-  height: 96px;
-  background-image: linear-gradient(to right bottom, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05), rgba(0, 0, 0, 0));
-  flex: none;
-}
 
-.card-popover-body {
-  display: flex;
-  flex-direction: column;
-  padding: 0 20px 20px;
-}
+/* ---------------- 悬停预览：这张卡对应的照片 ----------------
+   需求（用户 m05970）：悬停头像弹出的必须是这张卡的照片本身，而不是资料卡。
 
-/* 头像上浮压住横幅。负 margin 用 -36px（64/2 + 4），与参考站 -mt-9 观感一致。
-   box-sizing 必须 border-box，否则 3px 边框会把 64x64 撑成 70x70。 */
-.card-popover-ava {
-  box-sizing: border-box;
-  width: 64px;
-  height: 64px;
-  margin-top: -36px;
-  border-radius: 9999px;
-  border: 3px solid rgba(255, 255, 255, 0.25);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+   【照片区用内联 aspect-ratio】模板里给 .card-popover-photo 写了
+   aspectRatio: fw / fh，图片进 DOM 之前浮层就已占好正确高度；
+   computePopoverPosition 因此不会先按错误高度判「放得下」再被撑开。
+   下面的 aspect-ratio: 3 / 4 只是内联值缺失时的兜底（例如清单条目没有 w/h）。 */
+.card-popover-photo {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 3 / 4;
   overflow: hidden;
   background: rgba(255, 255, 255, 0.06);
   flex: none;
 }
 
-.card-popover-ava img {
+.card-popover-photo img {
   display: block;
   width: 100%;
   height: 100%;
   object-fit: cover;
 }
 
-.card-popover-name {
-  margin: 12px 0 0;
-  font-size: 20px;
-  font-weight: 700;
-  line-height: 25px;
-  color: #fff;
-}
-
-.card-popover-bio {
-  margin: 4px 0 0;
-  min-height: 20px;
-  font-size: 14px;
-  line-height: 20px;
-  color: rgba(255, 255, 255, 0.5);
-}
-
-/* 三列统计：数字大、标签小，数字用 tabular-nums 保证「–」也等宽。 */
-.card-popover-stats {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.card-popover-stat {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  align-items: flex-start;
-  min-width: 0;
-}
-
-.card-popover-num {
-  font-size: 18px;
-  font-weight: 700;
-  line-height: 24px;
-  color: #fff;
+/* 编号胶囊：右上角，压在照片上。深色半透明底 + 描边，任何亮度的照片上都可读。 */
+.card-popover-no {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  color: rgba(255, 255, 255, 0.92);
   font-variant-numeric: tabular-nums;
+  pointer-events: none;
 }
 
-.card-popover-lbl {
+/* 底部信息条：高度必须与脚本里的 POPOVER_FOOT_HEIGHT 一致（52），
+   否则 measurePopoverSize() 算出的总高与实际渲染高度对不上，
+   翻到锚点上方时会多出 52px 的偏差。 */
+.card-popover-foot {
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  height: 52px;
+  padding: 0 12px;
+  flex: none;
+}
+
+.card-popover-hint {
+  min-width: 0;
   font-size: 12px;
   line-height: 16px;
   color: rgba(255, 255, 255, 0.5);
-}
-
-.card-popover-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .card-popover-btn {
@@ -2191,9 +2190,11 @@ columns.value = assignColumns(columnCount.value);
     padding-top: 88px;
   }
 
-  /* 窄屏弹层：脚本已经把宽度钳到 min(288, 视口 - 24)，这里只收一下圆角，
-     免得在 320px 屏上弹层几乎占满宽度时圆角显得过大 */
+  /* 窄屏弹层宽度必须与脚本的 measurePopoverSize() 用同一公式 min(320, 视口-24)，
+     否则 CSS 画 320px、脚本按更小值算定位，left 会偏出去。
+     border-radius 收小一点，免得在 320px 屏上几乎占满宽度时圆角显得过大。 */
   .card-popover {
+    width: calc(100vw - 24px);
     border-radius: 14px;
   }
 }
