@@ -53,12 +53,17 @@
             :data-uid="card.uid"
             :style="{ '--card-delay': Math.min(i * 45, 270) + 'ms' }"
           >
-            <div class="card-tilt">
+            <div
+              class="card-tilt"
+              @mouseenter="onTiltEnter"
+              @mousemove="onTiltMove"
+              @mouseleave="onTiltLeave"
+            >
               <article class="card-glass">
                 <div class="card-media">
                   <img
                     :src="card.src"
-                    :alt="'写真 NO.' + card.no"
+                    alt="写真"
                     :width="card.w"
                     :height="card.h"
                     :loading="card.eager ? 'eager' : 'lazy'"
@@ -88,7 +93,7 @@
 
                 <div class="card-body">
                   <div class="card-body-inner">
-                    <h2 class="card-title">写真 NO.{{ card.no }}</h2>
+                    <h2 class="card-title">写真</h2>
                     <!--
                       互动图标保留（它是参考站视觉语言的一部分，删掉卡片下半部
                       会空一块），但数字一律是 0 —— 本项目没有真实互动数据，
@@ -146,9 +151,6 @@ import { nextTick, onMounted, onUnmounted, reactive, ref, shallowRef } from 'vue
 import { IMAGE_POOL } from '../core/config.js';
 import { assetUrl } from '../core/imageManifest.js';
 
-/** 序号补零：NO.07 而不是 NO.7，等宽视觉更整齐。 */
-const pad2 = (n) => String(n).padStart(2, '0');
-
 /**
  * 卡片数据（一次性构建，不随列数变化重建）。
  * 地址必须走 assetUrl(entry.thumb)：清单里是 "images/thumbnails/1.webp" 这样的
@@ -162,7 +164,6 @@ const cards = IMAGE_POOL
   .filter((entry) => entry && entry.id != null && entry.thumb)
   .map((entry, i) => ({
     uid: entry.id,
-    no: pad2(entry.id),
     src: assetUrl(entry.thumb),
     w: entry.w,
     h: entry.h,
@@ -403,7 +404,130 @@ onUnmounted(() => {
     observer = null;
   }
   measured.clear();
+
+  // 倾斜视差可能还排着一个 rAF：不取消的话，卸载后回调仍会跑一次
+  // （applyTilt 里有 isConnected 守卫，但取消更干净，也避免持有元素引用）。
+  if (tiltRaf) {
+    cancelAnimationFrame(tiltRaf);
+    tiltRaf = 0;
+  }
+  tiltBox = null;
 });
+
+/* --------------------------------------------------- 3D 倾斜视差 */
+
+/**
+ * 悬停时的 3D 倾斜与视差（逐字复刻参考站）。
+ *
+ * 参考站源码（page chunk @1341 附近的 S 组件）：
+ *   onMouseEnter 量一次卡片矩形，记 cx/cy/w/h，加 .is-tilting
+ *   onMouseMove  归一化 n = clamp((x-cx)/w, -0.5, 0.5)、r = clamp((y-cy)/h, -0.5, 0.5)
+ *                然后写 6 个自定义属性：
+ *                  --tilt-x      = (-(2*r*6)).toFixed(2) + 'deg'   垂直倾斜，最大 ±6deg
+ *                  --tilt-y      = ((2*n*8)).toFixed(2) + 'deg'    水平倾斜，最大 ±8deg
+ *                  --card-par-x  = ((2*n*10)).toFixed(1) + 'px'    图片视差，最大 ±10px
+ *                  --card-par-y  = ((2*r*6)).toFixed(1) + 'px'     图片视差，最大 ±6px
+ *                  --tilt-shadow-x = (-(2*n*12)).toFixed(1) + 'px' 投影偏移，最大 ±12px
+ *                  --tilt-shadow-y = (-(2*r*12)).toFixed(1) + 'px'
+ *   onMouseLeave 取消 rAF、清空矩形、逐个 removeProperty、移除 .is-tilting
+ *
+ * 三条与参考站一致的约束：
+ *   1. 只在 (hover: hover) and (pointer: fine) 且非 reduced-motion 下启用 ——
+ *      参考站是在 effect 里算一次 c.current 布尔值，触屏与减少动态效果环境直接不响应。
+ *   2. mousemove 用 rAF 合并，且用 s.current 作为「已排队」标志（同参考站）。
+ *   3. 矩形只在 mouseenter 量一次，移动过程不再读布局 —— 避免每帧强制回流。
+ */
+
+/** 参考站清理时遍历的属性名，顺序一致。 */
+const TILT_PROPS = [
+  '--tilt-x',
+  '--tilt-y',
+  '--card-par-x',
+  '--card-par-y',
+  '--tilt-shadow-x',
+  '--tilt-shadow-y',
+];
+
+/** 当前指针位置（rAF 里读，避免每个 mousemove 都进渲染帧）。 */
+const tiltPointer = { x: 0, y: 0 };
+/** 当前卡片的矩形缓存，null 表示未进入任何卡片。 */
+let tiltBox = null;
+/** 待执行的 rAF id，0 表示空闲。参考站用同一个变量兼任「已排队」标志。 */
+let tiltRaf = 0;
+
+/**
+ * 是否启用倾斜。与参考站一致：算一次，不随窗口变化重算。
+ * 用 try/catch 包住 matchMedia：极老的环境里没有 matchMedia，不能因此整页报错。
+ */
+const tiltEnabled = (() => {
+  try {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+    if (!window.matchMedia('(hover: hover) and (pointer: fine)').matches) return false;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+})();
+
+/** 指针进入卡片：量一次矩形，加上倾斜类。 */
+const onTiltEnter = (e) => {
+  if (!tiltEnabled) return;
+  const el = e.currentTarget;
+  if (!el) return;
+  const rect = el.getBoundingClientRect();
+  tiltBox = {
+    el,
+    cx: rect.left + rect.width / 2,
+    cy: rect.top + rect.height / 2,
+    w: rect.width,
+    h: rect.height,
+  };
+  el.classList.add('is-tilting');
+};
+
+/** 指针移动：只记坐标，真正写样式交给 rAF。 */
+const onTiltMove = (e) => {
+  if (!tiltEnabled || !tiltBox) return;
+  tiltPointer.x = e.clientX;
+  tiltPointer.y = e.clientY;
+  if (tiltRaf) return;
+  tiltRaf = requestAnimationFrame(applyTilt);
+};
+
+/** 把归一化坐标换算成 6 个自定义属性写进元素。 */
+function applyTilt() {
+  tiltRaf = 0;
+  const box = tiltBox;
+  if (!box) return;
+  const el = box.el;
+  if (!el || !el.isConnected) return;
+
+  // clamp 到 ±0.5：参考站用 Math.max/Math.min 而不是 Math.max(-1,...)，
+  // 因为卡片可能被缩放，指针跑到边缘外时也不该让倾斜超过设计上限。
+  const n = Math.max(-0.5, Math.min(0.5, (tiltPointer.x - box.cx) / box.w));
+  const r = Math.max(-0.5, Math.min(0.5, (tiltPointer.y - box.cy) / box.h));
+
+  el.style.setProperty('--tilt-x', (-(2 * r * 6)).toFixed(2) + 'deg');
+  el.style.setProperty('--tilt-y', (2 * n * 8).toFixed(2) + 'deg');
+  el.style.setProperty('--card-par-x', (2 * n * 10).toFixed(1) + 'px');
+  el.style.setProperty('--card-par-y', (2 * r * 6).toFixed(1) + 'px');
+  el.style.setProperty('--tilt-shadow-x', (-(2 * n * 12)).toFixed(1) + 'px');
+  el.style.setProperty('--tilt-shadow-y', (-(2 * r * 12)).toFixed(1) + 'px');
+}
+
+/** 指针离开卡片：取消排队、清缓存、逐个移除属性、去掉倾斜类。 */
+const onTiltLeave = (e) => {
+  if (tiltRaf) {
+    cancelAnimationFrame(tiltRaf);
+    tiltRaf = 0;
+  }
+  tiltBox = null;
+  const el = e && e.currentTarget;
+  if (!el) return;
+  for (const prop of TILT_PROPS) el.style.removeProperty(prop);
+  el.classList.remove('is-tilting');
+};
 
 // 首屏同步布局：在 setup 阶段就把列填好，模板第一次渲染即有卡片。
 columns.value = assignColumns(columnCount.value);
@@ -609,11 +733,39 @@ columns.value = assignColumns(columnCount.value);
   }
 }
 
+/*
+ * 倾斜/视差层。逐字对应参考站的 .post-card-tilt。
+ *
+ * 静止时只有位置与过渡声明，不写 transform —— 由脚本在指针进入时通过
+ * 6 个自定义属性驱动，离开时脚本会把属性逐个 removeProperty 掉，
+ * 这里靠 var() 的默认值 0deg/0 回落到平面。
+ *
+ * 两段过渡时长不同，这是参考站的原样设计：
+ *   .card-tilt            0.45s  (指针离开后平滑回正)
+ *   .card-tilt.is-tilting 0.12s  (跟随指针，短才能跟手)
+ */
 .card-tilt {
-  /* 参考站的倾斜/视差层由 JS 跟随指针实时计算；本轮按规格简化为静态，
-     保留这层 DOM 是为了以后加视差时不必改模板结构。 */
   position: relative;
-  transform: none;
+  transition:
+    transform 0.45s cubic-bezier(0.23, 1, 0.32, 1),
+    box-shadow 0.45s cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.card-tilt.is-tilting {
+  transform: perspective(1000px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+  transition:
+    transform 0.12s ease-out,
+    box-shadow 0.12s ease-out;
+  will-change: transform;
+  border-radius: 24px;
+  /* 投影跟着倾斜方向反向偏移，制造「卡片被抬起」的体积感。 */
+  box-shadow: var(--tilt-shadow-x, 0) var(--tilt-shadow-y, 0) 22px rgba(0, 0, 20, 0.3);
+}
+
+/* 倾斜时图片反向视差 + 放大到 1.1，比普通 hover 的 1.04 更强，产生景深。 */
+.card-tilt.is-tilting .card-media img {
+  transform: translate3d(var(--card-par-x, 0), var(--card-par-y, 0), 0) scale(1.1);
+  transition: transform 0.15s ease-out;
 }
 
 /* ---------------- 玻璃卡片 ---------------- */
@@ -718,7 +870,8 @@ columns.value = assignColumns(columnCount.value);
 }
 
 .card-glass:hover .card-media img {
-  transform: scale(1.04);
+  /* 参考站是 1.08；倾斜态会覆盖成 1.1（见 .card-tilt.is-tilting）。 */
+  transform: scale(1.08);
 }
 
 /* 底部渐变遮罩：让上浮的作者行与图片底部之间有过渡，不至于硬切 */
@@ -848,6 +1001,24 @@ columns.value = assignColumns(columnCount.value);
   .card-author img:hover,
   .card-shell:hover {
     transform: none !important;
+  }
+
+  /*
+   * 倾斜视差：脚本层面 tiltEnabled 已经在这种环境下返回 false、根本不会
+   * 加 .is-tilting，所以下面两条理论上不会命中。仍然写上是为了防住
+   * 「用户在页面打开后才切换系统设置」的场景 —— matchMedia 只在 setup 时
+   * 求值一次，设置改变后脚本不会重新计算，此时必须由 CSS 兜底压平。
+   */
+  .card-tilt,
+  .card-tilt.is-tilting {
+    transform: none !important;
+    box-shadow: none !important;
+    transition: none !important;
+  }
+
+  .card-tilt.is-tilting .card-media img {
+    transform: none !important;
+    transition: none !important;
   }
 }
 
