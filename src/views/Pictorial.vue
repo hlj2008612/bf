@@ -49,7 +49,7 @@
             v-for="(card, i) in column"
             :key="card.uid"
             class="card-shell"
-            :class="{ 'is-visible': revealed.has(card.uid) }"
+            :class="{ 'is-visible': revealed.has(card.uid), 'is-settled': animatedOnce.has(card.uid) }"
             :data-uid="card.uid"
             :style="{ '--card-delay': Math.min(i * 45, 270) + 'ms' }"
           >
@@ -155,16 +155,21 @@ const pad2 = (n) => String(n).padStart(2, '0');
  * 相对路径，前缀由 import.meta.env.BASE_URL 提供，子路径部署才不会 404。
  * 这里绝不能写死 /images/thumbnails/x.webp（规格第 5.1 条）。
  */
-const cards = IMAGE_POOL.map((entry, i) => ({
-  uid: entry.id,
-  no: pad2(entry.id),
-  src: assetUrl(entry.thumb),
-  w: entry.w,
-  h: entry.h,
-  // 首屏前几张优先加载：全部 lazy 会让 LCP 等到滚动容器的懒加载判定，
-  // 首屏出现一段空白。6 张 ≈ 一屏两行的量。
-  eager: i < 6,
-}));
+const cards = IMAGE_POOL
+  // 清单条目必须带 id 与 thumb：缺 id 会让 :key 与 data-uid 全部变成 undefined
+  // （Vue 报重复 key、卡片无法区分），缺 thumb 会请求 /undefined 拿 404。
+  // 生成脚本目前总会写出这两个字段，这里只是防御，不改变正常路径。
+  .filter((entry) => entry && entry.id != null && entry.thumb)
+  .map((entry, i) => ({
+    uid: entry.id,
+    no: pad2(entry.id),
+    src: assetUrl(entry.thumb),
+    w: entry.w,
+    h: entry.h,
+    // 首屏前几张优先加载：全部 lazy 会让 LCP 等到滚动容器的懒加载判定，
+    // 首屏出现一段空白。6 张 ≈ 一屏两行的量。
+    eager: i < 6,
+  }));
 
 /* ------------------------------------------------------------ 列数 */
 
@@ -265,7 +270,20 @@ function measureHeights() {
 
 /** 已入场的卡片 uid。用 reactive(Set)：模板里 revealed.has() 会被追踪。 */
 const revealed = reactive(new Set());
+
+/**
+ * 已经播过入场动画的 uid（普通 Set，故意不做响应式）。
+ *
+ * 【为什么需要】跨断点重排时 Vue 会把跨父列的 .card-shell 销毁重建。
+ * 新节点一挂载就带 .is-visible，animation 会从头再跑一遍 1.1s，
+ * 整片卡片重新模糊闪入（实测跨 5 列 -> 3 列时 20 张里有 14 张重播）。
+ * 这里记住「已播过」，重建出的节点直接带 .is-settled 跳过动画。
+ * 故意不响应式：只在渲染时读一次当时的值，不需要触发更新。
+ */
+const animatedOnce = new Set();
 let observer = null;
+/** 当前正在被 observer 观察的节点，用来清理已脱离文档的旧节点。 */
+const observedNodes = new Set();
 
 /**
  * 懒挂载 IntersectionObserver：只有浏览器支持时才创建。
@@ -281,7 +299,9 @@ function ensureObserver() {
         if (!entry.isIntersecting) continue;
         const uid = Number(entry.target.dataset.uid);
         revealed.add(uid);
+        animatedOnce.add(uid);
         observer.unobserve(entry.target);
+        observedNodes.delete(entry.target);
       }
     },
     // 提前 240px 触发：等卡片真的进视口再播 1.1s 的模糊揭示，会看到"先空后闪"。
@@ -299,13 +319,27 @@ function observeCards() {
   const nodes = root.querySelectorAll('.card-shell[data-uid]');
 
   if (!io) {
-    for (const node of nodes) revealed.add(Number(node.dataset.uid));
+    for (const node of nodes) { const uid = Number(node.dataset.uid); revealed.add(uid); animatedOnce.add(uid); }
     return;
   }
+
+  // 【关键】先把已经脱离文档的旧节点移出观察列表。
+  // 跨断点时 Vue 会销毁并重建跨父列的卡片，旧节点虽然已不在 DOM 里，
+  // 却仍被 IntersectionObserver 强引用（连同整棵子树和 img），
+  // 直到组件卸载才 disconnect()。实测连跨 4 次断点会留下 28 个游离节点。
+  for (const node of observedNodes) {
+    if (!node.isConnected) {
+      io.unobserve(node);
+      observedNodes.delete(node);
+    }
+  }
+
   for (const node of nodes) {
     const uid = Number(node.dataset.uid);
     if (revealed.has(uid)) continue;
+    if (observedNodes.has(node)) continue;
     io.observe(node);
+    observedNodes.add(node);
   }
 }
 
@@ -365,6 +399,7 @@ onUnmounted(() => {
   rafId = 0;
   if (observer) {
     observer.disconnect();
+    observedNodes.clear();
     observer = null;
   }
   measured.clear();
@@ -545,6 +580,12 @@ columns.value = assignColumns(columnCount.value);
   filter: none;
   transform: none;
   animation: cardEnterBlurReveal 1.1s cubic-bezier(0.23, 1, 0.32, 1) var(--card-delay, 0ms) backwards;
+}
+
+/* 已经播过入场动画、因跨断点被重建的卡片：直接显示，不再重播。
+   必须写在 .is-visible 之后才能覆盖它的 animation。 */
+.card-shell.is-visible.is-settled {
+  animation: none;
 }
 
 @keyframes cardEnterBlurReveal {
