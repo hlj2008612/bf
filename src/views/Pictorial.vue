@@ -253,7 +253,6 @@
           :alt="'照片 ' + padId(viewerCard.uid) + ' 大图'"
           decoding="async"
           draggable="false"
-          @load="onViewerImgLoad"
           @error="onViewerImgError"
         />
         <figcaption class="photo-viewer-cap">
@@ -721,13 +720,12 @@ const padId = (id) => String(id).padStart(2, '0');
 
 /** 当前打开的卡片（null = 关闭）。整个页面同一时刻只有一个。 */
 const activeCard = ref(null);
-/** 弹层 DOM 引用，定位时需要量它自己的尺寸。 */
-
 /** 当前打开的大图（null = 关闭）。与资料卡互斥，同一时刻只显示一个。 */
 const viewerCard = ref(null);
 /** 大图层 DOM 引用（用来接管焦点，Esc 时还原）。 */
 const viewerRef = ref(null);
 /** 打开大图前的焦点元素，关闭时还原，键盘用户不会丢失位置。 */
+/** 弹层 DOM 引用，定位时需要量它自己的尺寸。 */
 let viewerReturnFocus = null;
 const popoverRef = ref(null);
 
@@ -765,20 +763,30 @@ const POPOVER_FALLBACK_VW = 320;
 
 const clampNum = (v, min, max) => Math.max(min, Math.min(max, v));
 
+/** 资料卡固定高度（资料卡是固定尺寸，不随图片比例变化）。 */
+const POPOVER_CARD_HEIGHT = 339;   // 资料卡固定高度，真机实测 offsetHeight = 339（旧值 320 偏小 19px）
+
 /**
- * 量一张图片的显示尺寸：宽度铺满弹层，高度按原图长宽比，并有上下限。
+ * 首次渲染后测到的真实高度。0 = 还没测过。
+ * 【为什么不能只用常量】入场动画会改变 rect，且浏览器缩放/字体设置会让高度浮动；
+ * 偏差会让 computePopoverPosition 的 spaceBelow/spaceAbove 判断失真：
+ * 判定「下方放得下」但实际渲染出来底部被视口裁掉，最下面的「查看大图」按钮就点不到了。
+ * 弹层是固定尺寸（不随图片比例变化），所以测一次就能一直用。
+ */
+let popoverMeasuredHeight = 0;
+
+/**
+ * 量资料卡的显示尺寸（固定尺寸，不按照片比例变化）。
  *
- * 【为什么不用 CSS 的 aspect-ratio 来定高】定位（尤其是「放得下吗 / 要不要翻到上方」）
- * 需要在弹层渲染前就知道它的高度，否则要渲染两次、第一帧还会闪一下。
+ * 定位（尤其是「放得下吗 / 要不要翻到上方」）需要在弹层渲染前就知道它的高度。
  * 这里在 JS 里用同一套规则算出来，再作为内联宽高写回去，CSS 与 JS 只有一个真相。
  *
- * @param {object} card 卡片数据（含 fw / fh 原始像素宽高）
  * @returns {{ width:number, height:number }}
  */
 function measurePopoverSize() {
   /* 头像资料卡是【固定尺寸】的，不像原来按照片比例算高度：
      banner 96 + 头像上浮 28 + 昵称 25 + 简介 20 + 统计 24+16+16 + 按钮 36+16 + 底部 20
-     ≈ 297，这里保守取 POPOVER_CARD_HEIGHT = 320（实测 320 上下）。
+     ≈ 297。真机实测 offsetHeight = 339（含内边距与边框），常量取实测值。
      只有窄屏（<320px）时宽度会收窄，高度不变。 */
   const vw = typeof window === 'undefined' ? 1440 : window.innerWidth;
   const vwOk = vw > 0 ? vw : POPOVER_FALLBACK_VW;
@@ -786,16 +794,6 @@ function measurePopoverSize() {
   // 测过一次就用真实高度，首帧仍用保守常量估
   return { width, height: popoverMeasuredHeight || POPOVER_CARD_HEIGHT };
 }
-/** 资料卡固定高度（资料卡是固定尺寸，不随图片比例变化）。 */
-const POPOVER_CARD_HEIGHT = 339;   // 资料卡固定高度，真机实测 offsetHeight = 339（旧值 320 偏小 19px）
-/**
- * 首次渲染后测到的真实高度。0 = 还没测过。
- * 【为什么不能只用常量】CSS 实测约 332~350px，而常量保守取 320，
- * 两者差 12~30px 会让 computePopoverPosition 的 spaceBelow/spaceAbove 判断失真：
- * 判定「下方放得下」但实际渲染出来底部被视口裁掉，最下面的「查看大图」按钮就点不到了。
- * 弹层是固定尺寸（不随图片比例变化），所以测一次就能一直用。
- */
-let popoverMeasuredHeight = 0;
 
 /** 顶部固定导航预留高度：NavBar top:20 + height:60 + 10px 呼吸。 */
 /** 窄屏导航的同一预留（NavBar 在小屏更扁，这里按 88px 的页面 padding-top 取）。 */
@@ -1111,7 +1109,10 @@ function onAvatarLeave(viaBlur = false) {
   if (isBlur) {
     // 焦点从头像移到别处（但不是移进弹层）：立即关。
     // 若焦点是移进弹层内部（Tab 到按钮），保持打开。
-    setTimeout(() => {
+    // 存进 hoverCloseTimer 统一清理：组件若在同一帧内卸载，回调执行时已无 popover，
+    // 不加跟踪就成了一个游离定时器（虽然 closePreview 幂等、不会崩，但违反「不留异步尾巴」）。
+    hoverCloseTimer = setTimeout(() => {
+      hoverCloseTimer = 0;
       const pop = popoverRef.value;
       const focused = document.activeElement;
       if (pop && focused && pop.contains(focused)) return;
@@ -1221,7 +1222,6 @@ function onViewerBackdropClick(e) {
   if (e.target === e.currentTarget) closeViewer();
 }
 
-const onViewerImgLoad = () => {};
 const onViewerImgError = () => {
   /* 大图 404 时浏览器会显示裂图。这里不额外处理：
      full/ 与 thumbnails/ 同一批生成，失败只可能是部署漏了 public/images/full，
@@ -1879,8 +1879,6 @@ columns.value = assignColumns(columnCount.value);
   /* 提升为独立合成层，避免每帧重新计算 backdrop-filter 的采样区域 */
   will-change: transform, opacity;
 }
-
-/*
 
 /*
  * 入场 / 出场：两个 keyframes 覆盖同一组属性，用 animation-direction /
