@@ -94,6 +94,30 @@ body {
     }
 }
 
+/* ----------------------------------------------------------------
+   转场期间临时压低导航栏层级（缺陷修复，配合 PtrTransition.vue 的 setPtrActive）
+   ----------------------------------------------------------------
+   问题：.glass-nav 是 position:fixed + z-index:99999（见 src/components/NavBar.vue），
+   .ptr-root 是 position:fixed + z-index:20000，二者同属 body 的层叠上下文，
+   => 覆盖层永远盖不住导航栏（真 Chrome 实测 cover 阶段 elementFromPoint 命中 NAV）。
+
+   方案：转场进行中在 <html> 上挂 data-ptr-active，把导航栏压到覆盖层之下。
+   · 只改层级，不改 position/transform —— 导航栏在覆盖层之下渲染，结束后原位恢复，
+     没有重排、没有跳动，也不存在「永久降级」。
+   · 标记由组件在 start() 打上、在 busy 释放的同一回调里摘掉，
+     空闲态（.ptr-root.ptr-idle，visibility:hidden）下这条规则不生效，
+     导航栏照常可点。
+   · 具体度 0-2-1 > NavBar scoped 的 .glass-nav[data-v-*] 0-2-0，无需 !important；
+     保留 !important 是为了压过将来可能出现的内联 style。
+
+   为什么不用「把 .ptr-root 调到 100000」：那会把 PhotoWall 的 .close-btn（99998）、
+   Pictorial 的 .card-popover（2000）等所有浮层在转场期间一并埋掉，并且让覆盖层
+   永远依赖「谁的数值更大」这条脆弱的隐式契约。降导航栏是局部、可逆、成对的改动。
+   ---------------------------------------------------------------- */
+html[data-ptr-active] .glass-nav {
+    z-index: 0 !important;
+}
+
 /* 键盘用户能看到焦点环（:focus-visible 不会影响鼠标点击观感） */
 :focus-visible {
     outline: 2px solid #4a9eff;
@@ -128,7 +152,24 @@ body {
    （组件侧另有 prefers-reduced-motion 短路：直接跳转、不启动转场。）
    ================================================================ */
 
-.ptr-root{position:fixed;inset:0;z-index:20000;overflow:hidden;pointer-events:auto;contain:strict;--ptr-accent:#ff2d78;--ptr-accent-rgb:255,45,120;--ptr-soft-rgb:255,109,168;--ptr-paper:#fff3f9;--ptr-flash-c:#ffe1ef;--ptr-split:#29e0ff;--ptr-panel-a:#221019;--ptr-panel-b:#120712;--ptr-panel-c:#09040a}
+/* ----------------------------------------------------------------
+   【为什么 .ptr-root 是 pointer-events:none】
+
+   参考站源码里这里是 pointer-events:auto —— 因为它的覆盖层自带「横滑手势翻页」
+   （touchstart/touchend 判定），必须能接住触摸事件。我方【没有手势翻页】，
+   覆盖层纯粹是视觉层，不需要接收任何输入。
+
+   保留 auto 会造成两处实际故障（真 Chrome 1440x900 实测）：
+     1) 转场期间点击全被覆盖层吃掉，导航栏收不到任何事件 —— 用户报告的
+        「点了导航没反应」就是这个。实测 elementFromPoint(500,51) 在 cover 阶段
+        返回覆盖层内的无类名 SPAN，navHitSelf=false。
+     2) 键盘 Tab 焦点会被吸进覆盖层的装饰元素里。
+
+   改成 none 之后：覆盖层只负责画，事件全部穿透到下层真实 UI。
+   空闲态 .ptr-root.ptr-idle 原本就是 visibility:hidden + pointer-events:none，
+   所以这里只是把「转场进行中也不吃事件」补齐，两种状态行为一致。
+   ---------------------------------------------------------------- */
+.ptr-root{position:fixed;inset:0;z-index:20000;overflow:hidden;pointer-events:none;contain:strict;--ptr-accent:#ff2d78;--ptr-accent-rgb:255,45,120;--ptr-soft-rgb:255,109,168;--ptr-paper:#fff3f9;--ptr-flash-c:#ffe1ef;--ptr-split:#29e0ff;--ptr-panel-a:#221019;--ptr-panel-b:#120712;--ptr-panel-c:#09040a}
 .ptr-root.ptr-idle{visibility:hidden;pointer-events:none}
 .ptr-theme-purple{--ptr-accent:#a85cff;--ptr-accent-rgb:168,92,255;--ptr-soft-rgb:199,148,255;--ptr-paper:#f7f2ff;--ptr-flash-c:#ecdfff;--ptr-split:#2dffc8;--ptr-panel-a:#1c1026;--ptr-panel-b:#110a1c;--ptr-panel-c:#08040f}
 .ptr-theme-green{--ptr-accent:#2ee36b;--ptr-accent-rgb:46,227,107;--ptr-soft-rgb:122,240,166;--ptr-paper:#f0fdf4;--ptr-flash-c:#dcffe8;--ptr-split:#29b6ff;--ptr-panel-a:#0f2017;--ptr-panel-b:#08150e;--ptr-panel-c:#030a06}
