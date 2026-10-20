@@ -34,7 +34,14 @@
       <!-- ============ 照片流舞台 ============ -->
       <div class="cinema-stage">
         <div class="cinema-tilted">
-          <div class="cinema-cols">
+          <!--
+            :key 绑定列数：列数变化时必须【强制重建】而不是原地 patch。
+            原因是 .cinema-col-track 的动画是 translateY(-50%) 百分比位移，
+            列宽一变、卡高跟着变，百分比会按新高度立即重算 —— 若沿用同一个
+            元素，画面会瞬间平移一两张卡。重建后动画从 0 开始，而 -50% 恰好
+            等于第二份内容的起点，所以「从头开始」与当前画面视觉等价，不会跳。
+          -->
+          <div class="cinema-cols" :key="columnCount">
             <div v-for="col in columns" :key="col.id" class="cinema-col">
               <!--
                 时长走 CSS 变量而不是直接写 animation-duration：
@@ -107,7 +114,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { nextTick, onBeforeUnmount, onMounted, ref, shallowRef } from 'vue';
 // 【必须】从 config.js 取 IMAGE_POOL，而不是直接从 imageManifest.js 拿原始清单：
 // config.js 的 validatePool() 会校验张数与字段，无效时返回空数组。
 // 绕过它直接取模，等于把这道防线拆掉 —— 空池时 entry 是 undefined，
@@ -116,96 +123,71 @@ import { IMAGE_POOL } from '../core/config.js';
 import { assetUrl } from '../core/imageManifest.js';
 
 /**
- * 每列滚动时长（秒）—— 参考站实测值，下标 = 列序号（第 1 列 55s … 第 7 列 52s）。
- * 数值故意互不相等，七列才会呈现"错落"的观感；改成同一个数会像一整块在动。
+ * 每列滚动时长（秒）—— 参考站实测值，按列序号取用（第 1 列 55s …）。
+ * 数值故意互不相等，各列才会呈现「错落」的观感；改成同一个数会像一整块在动。
  */
 const COLUMN_DURATIONS = [55, 62, 50, 68, 58, 64, 52];
-
-/** 每列卡片数 —— 参考站实测 6/4/4/4/4/4/4，合计 30 张，用 20 张图循环取用。 */
-const COLUMN_CARD_COUNTS = [6, 4, 4, 4, 4, 4, 4];
 
 /** 跑马灯文案：两段 span 内容必须逐字相同，否则 translateX(-50%) 会露出接缝。 */
 const MARQUEE_TEXT =
   '影院模式  •  CINEMA MODE  •  要说漂亮哟~  •  PHOTO WALL  •  NOW PLAYING  •  上映中  ·  ';
 
-/** 序号补零，卡片角标用（NO.07 而不是 NO.7，等宽视觉更整齐）。 */
+/** 序号补零，alt 文案用（照片 07 而不是 照片 7，等宽视觉更整齐）。 */
 const pad2 = (n) => String(n).padStart(2, '0');
 
 const POOL_SIZE = IMAGE_POOL.length;
 
-/** 最大公约数。判断"某个数是否与 POOL_SIZE 互质"全靠它，也是本次缺陷的数学根因。 */
-const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+/**
+ * 候选列数，从多到少。选列的算法会从 MAX 往下试，取第一个几何上成立的。
+ * 上限 6 而不是 7：20 张照片分 7 列会得到 3,3,3,3,3,3,2，末列只有 2 张，
+ * 而桌面单屏可见 3 张，那一列必然循环到副本 —— 「7 列」与「零重复」不可兼得。
+ */
+const COLUMN_MAX = 6;
+const COLUMN_MIN = 2;
+
+/** 视口宽度 → 初始候选列数（仅用于首帧，挂载后会被几何实测覆盖）。 */
+const pickInitialColumnCount = (width) => {
+  if (width >= 1024) return 6;
+  if (width >= 640) return 5;
+  return 4;
+};
 
 /**
- * 取图步长初值。POOL_SIZE = 20 时它本身就是答案：gcd(9, 20) = 1。
- * 写成"初值 + while 递增"而不是直接写 9，是因为清单张数会随照片增减而变
- * （由 scripts/optimize-images.mjs 生成），初值未必对新张数互质。
+ * 把 20 张照片轮流分到 count 列，并构建每列的循环轨道。
+ *
+ * 【取图方式：轮转】第 i 张照片放进第 (i % count) 列。
+ * 这样每张照片【恰好出现一次】，天然零重复，也不需要「步长与池大小互质」
+ * 这类数论约束（旧实现的 gcd 检查就是为此存在的，现已不需要）。
+ * 顺带一个好处：相邻列永远不会共享同一张照片，不可能出现「阶梯状重复」。
+ *
+ * 【无缝循环】每列内容必须复制一份拼在轨道末尾：轨道总高 = 2 × 内容高，
+ * translateY(-50%) 才恰好落在与起点完全相同的画面上。少了这一步，-50% 会
+ * 跳到内容中部，肉眼可见一次「跳帧」。复制份打 duplicate 标记：alt 置空 +
+ * aria-hidden，避免读屏把同样的照片念两遍。
+ *
+ * 【为什么要复制一份，却仍算「不重复」】副本是同一张照片的第二个 DOM 实例，
+ * 但它只会在「单份内容已完全滚出屏幕」之后才进入视口 —— 这由列数选择保证，
+ * 见 pickFitColumnCount()。所以屏幕上任何时刻看到的照片两两不同。
+ *
+ * @param {number} count 列数
+ * @returns {Array<object>} 每列的卡片轨道
  */
-const STEP_SEED = 9;
+const buildColumns = (count) => {
+  // 空池（清单缺失或校验失败）时不构建任何列：舞台渲染成空的，
+  // 跑马灯与骨架照常显示 —— 这是降级，不是崩溃。
+  if (POOL_SIZE === 0 || count <= 0) return [];
 
-/** 列偏移初值。POOL_SIZE = 20 时它本身就是答案：gcd(7, 20) = 1 且 7 !== 9。 */
-const OFFSET_SEED = 7;
+  // 列数不能超过照片数，否则会出现没有任何卡片的空列（高度 0，动画跑在空气上）。
+  const effective = Math.min(count, POOL_SIZE);
 
-/**
- * 单列内的取图步长：从 STEP_SEED 起，往上找第一个与 POOL_SIZE 互质的数。
- *
- * 【为什么必须互质】列内取图是 i * step mod POOL_SIZE。step 与 POOL_SIZE
- * 不互质时，这个序列的周期是 POOL_SIZE / gcd(step, POOL_SIZE)，一列还没
- * 走满一整圈就开始撞图。例：POOL_SIZE = 21、step = 7，六张卡只会得到
- * 0/7/14/0/7/14 —— 三张图各重复两遍。互质时周期 = POOL_SIZE，
- * 列内连续 count 张两两不同（count <= POOL_SIZE 时）。
- */
-const COLUMN_STEP = (() => {
-  // 空池时 columns 本来就是 []，这个值不会被任何卡片读到；但 while 循环在
-  // POOL_SIZE = 0 时会因 gcd(x, 0) === x 永不收敛，必须先挡掉。
-  if (POOL_SIZE === 0) return 1;
-  let step = STEP_SEED;
-  while (gcd(step, POOL_SIZE) !== 1) step += 1;
-  return step;
-})();
+  const buckets = Array.from({ length: effective }, () => []);
+  IMAGE_POOL.forEach((entry, index) => {
+    buckets[index % effective].push(entry);
+  });
 
-/**
- * 列偏移步长：第 c 列的起点是 c * COLUMN_OFFSET mod POOL_SIZE。
- *
- * 【为什么必须互质】偏移不互质时，c * offset mod POOL_SIZE 走不满一整圈。
- * 这正是本次缺陷：旧代码把偏移写死成 5，POOL_SIZE = 20 时 gcd(5, 20) = 5，
- * 周期只有 20 / 5 = 4 —— 第 1 列与第 5 列、第 2 列与第 6 列起点相同，
- * 又因为两列步长相同、张数相同，整列内容逐张重合，肉眼就是"同一列照片
- * 出现了两次"；同时 20 张图只用得到 17 张（编号 4/14/19 从未被取到）。
- * 互质时周期 = POOL_SIZE，7 列的起点互不相同。
- *
- * 【为什么偏移不能等于步长】偏移若等于步长，第 c 列的内容就是第 c-1 列
- * 沿列内序列平移一格：count 张里 count-1 张重合，仍然会被看成同一串照片。
- * 偏移与步长取两个不同的互质数，两列的序列才真正错开。
- */
-const COLUMN_OFFSET = (() => {
-  if (POOL_SIZE === 0) return 0;
-  let offset = OFFSET_SEED;
-  while (gcd(offset, POOL_SIZE) !== 1 || offset === COLUMN_STEP) offset += 1;
-  return offset;
-})();
-
-/**
- * 为一列挑选卡片。
- *
- * 取图公式 (columnIndex * COLUMN_OFFSET + i * COLUMN_STEP) % POOL_SIZE：
- *   - COLUMN_STEP 与 POOL_SIZE 互质 → 列内序列周期 = POOL_SIZE，一列内不撞图。
- *     POOL_SIZE = 20 时 COLUMN_STEP = 9，一列 6 张得到 0/9/18/7/16/5，两两不同。
- *   - COLUMN_OFFSET 与 POOL_SIZE 互质 → 列起点 c * COLUMN_OFFSET mod POOL_SIZE
- *     的周期也是 POOL_SIZE，7 列起点互不相同（20 张时是 0/7/14/1/8/15/2），
- *     既不会整列重复，20 张图也全部被取到。
- *   - 两者还必须不相等（理由见 COLUMN_OFFSET 的注释），否则相邻列只差一张。
- *
- * @param {number} columnIndex 列序号，从 0 开始
- * @param {number} count       该列卡片数
- * @returns {Array<object>} 卡片描述对象数组
- */
-const buildCards = (columnIndex, count) => {
-  const cards = [];
-  for (let i = 0; i < count; i += 1) {
-    const entry = IMAGE_POOL[(columnIndex * COLUMN_OFFSET + i * COLUMN_STEP) % POOL_SIZE];
-    cards.push({
-      key: 'c' + columnIndex + '-' + i,
+  return buckets.map((entries, columnIndex) => {
+    const cards = entries.map((entry, index) => ({
+      key: 'c' + columnIndex + '-' + index,
       // 【必须】用 assetUrl 拼地址：清单里的 thumb 是不带前导斜杠的相对路径，
       // 前缀由 import.meta.env.BASE_URL 提供，子路径部署才不会 404。
       // 这里绝不能写死 /images/thumbnails/x.webp。
@@ -214,41 +196,119 @@ const buildCards = (columnIndex, count) => {
       w: entry.w,
       h: entry.h,
       duplicate: false,
-    });
-  }
-  return cards;
+    }));
+
+    const track = cards.concat(
+      cards.map((card) => ({
+        ...card,
+        key: card.key + '-dup',
+        alt: '',
+        duplicate: true,
+      }))
+    );
+
+    return {
+      id: columnIndex,
+      duration: COLUMN_DURATIONS[columnIndex % COLUMN_DURATIONS.length],
+      // 方向交替：第 1/3/5 列向下，第 2/4/6 列向上（参考站实测规律）
+      direction: columnIndex % 2 === 0 ? 'down' : 'up',
+      track,
+    };
+  });
+};
+
+const columns = shallowRef([]);
+const columnCount = ref(0);
+
+/**
+ * 判断当前 DOM 里「每列最少张数 >= 单屏可见张数」是否成立。
+ *
+ * 【为什么必须实测而不是算】可见张数 = ceil(列高 / 单卡步长)，而：
+ *   - 列高来自窗口高度；
+ *   - 单卡步长 = 列宽 × 4/3 + gap，列宽又来自窗口宽度 / 列数；
+ *   - 舞台整体还有 rotate(-10deg) scale(1.1)，旋转后外侧列的斜向可视弦长
+ *     比列高更长（1440 宽时边缘列约 +210px）。
+ * 也就是说「列数 → 列宽 → 卡高 → 可见张数」是循环依赖，只按宽度分档必然
+ * 在「高窗口」上翻车（实测 1440x1200：6 列时每列 3 张，屏幕却能放 4 张）。
+ * 所以这里直接读真实布局，把注释里的推导变成运行时的不变量。
+ *
+ * @returns {boolean} true = 当前列数安全
+ */
+const isColumnCountSafe = () => {
+  const firstCol = document.querySelector('.cinema-col');
+  if (!firstCol) return true;
+  const cards = firstCol.querySelectorAll('.cinema-card');
+  const colCount = document.querySelectorAll('.cinema-col').length;
+  if (!colCount || cards.length < 2) return true;
+
+  const colH = firstCol.offsetHeight;
+  const step = cards[1].offsetTop - cards[0].offsetTop;
+  if (!(step > 0) || !(colH > 0)) return true;
+
+  // 单份内容 = 轨道的一半；屏幕上同时可见的卡片数 = ceil(列高 / 步长)
+  const visible = Math.ceil(colH / step);
+  const minCards = Math.floor(POOL_SIZE / colCount);
+  return minCards >= visible;
 };
 
 /**
- * 七列数据。
+ * 选出几何上成立的最大列数。
  *
- * 【无缝循环的核心】每列内容必须【复制一份】拼在轨道末尾：
- * 轨道总高 = 2 × 内容高，translateY(-50%) 才恰好落在与起点完全相同的画面上。
- * 少了这一步，-50% 会跳到内容中部，肉眼可见一次"跳帧"。
- *
- * 复制份打上 duplicate 标记：alt 置空 + aria-hidden，避免读屏把同样的
- * 30 张照片念两遍。
+ * 做法是「先按初始候选渲染 → 实测 → 不安全就减一列 → 再实测」，
+ * 而不是纯公式推导：列数变少会让列变宽、卡片变高、可见张数下降，
+ * 所以这是个单调收敛的过程，最多试 COLUMN_MAX - COLUMN_MIN 次。
  */
-// 空池（清单缺失或校验失败）时不构建任何列：
-// 舞台渲染成空的，跑马灯与骨架照常显示 —— 这是降级，不是崩溃。
-const columns = POOL_SIZE === 0 ? [] : COLUMN_CARD_COUNTS.map((count, columnIndex) => {
-  const cards = buildCards(columnIndex, count);
-  const track = cards.concat(
-    cards.map((card) => ({
-      ...card,
-      key: card.key + '-dup',
-      alt: '',
-      duplicate: true,
-    }))
-  );
+const applyColumnCount = async (count) => {
+  let next = Math.min(Math.max(count, COLUMN_MIN), COLUMN_MAX);
+  columnCount.value = next;
+  columns.value = buildColumns(next);
+  await nextTick();
 
-  return {
-    id: columnIndex,
-    duration: COLUMN_DURATIONS[columnIndex],
-    // 方向交替：第 1/3/5/7 列向下，第 2/4/6 列向上（实测规律）
-    direction: columnIndex % 2 === 0 ? 'down' : 'up',
-    track,
-  };
+  while (next > COLUMN_MIN && !isColumnCountSafe()) {
+    next -= 1;
+    columnCount.value = next;
+    columns.value = buildColumns(next);
+    await nextTick();
+  }
+};
+
+// 首帧先用宽度给个候选，挂载后再用实测收敛（见 onMounted）。
+const initialWidth = typeof window === 'undefined' ? 1440 : window.innerWidth;
+columnCount.value = pickInitialColumnCount(initialWidth);
+columns.value = buildColumns(columnCount.value);
+
+onMounted(() => {
+  applyColumnCount(pickInitialColumnCount(window.innerWidth));
+});
+
+// 跨断点 / 改窗口高度时重算。rAF 合并连续 resize 事件；
+// 宽度与高度都要参与判断 —— 只按宽度会在「高窗口」上漏判。
+let resizeRaf = 0;
+let lastW = typeof window === 'undefined' ? 0 : window.innerWidth;
+let lastH = typeof window === 'undefined' ? 0 : window.innerHeight;
+const onResize = () => {
+  if (resizeRaf) return;
+  resizeRaf = requestAnimationFrame(() => {
+    resizeRaf = 0;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    if (w === lastW && h === lastH) return;
+    lastW = w;
+    lastH = h;
+    applyColumnCount(pickInitialColumnCount(w));
+  });
+};
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('resize', onResize);
+}
+
+onBeforeUnmount(() => {
+  if (typeof window !== 'undefined') window.removeEventListener('resize', onResize);
+  if (resizeRaf) {
+    cancelAnimationFrame(resizeRaf);
+    resizeRaf = 0;
+  }
 });
 
 /** 暂停开关（对应 WCAG 2.2.2 的暂停机制，见模板里的按钮注释）。 */
@@ -342,7 +402,7 @@ const isPaused = ref(false);
 .cinema-col {
   position: relative;
   overflow: hidden;
-  /* 不写 min-width:0 的话，列内的长内容会把列撑宽，7 列宽度就不均了 */
+  /* 不写 min-width:0 的话，列内的长内容会把列撑宽，列数一多宽度就不均了 */
   min-width: 0;
   flex: 1;
 }
@@ -699,28 +759,29 @@ const isPaused = ref(false);
 /* ================================================================
    窄屏适配
    ----------------------------------------------------------------
-   7 列在 375px 宽的屏幕上，每列只剩 (375 - 6x6) / 7 约 48px，
-   卡片被压成竖条，完全看不出是照片。
+   列数一多，375px 宽的屏幕上每列只剩几十像素，卡片被压成竖条，
+   完全看不出是照片。
 
-   方案：窄屏【隐藏末尾的列】，剩下的列靠 flex:1 自动撑宽 ——
-   纯 CSS，不需要 JS 监听 resize，也不会因为列数变化重建动画。
-   被隐藏的列不产生布局盒，里面的 loading="lazy" 图片也不会下载。
-   同时把倾斜角度调小、缩放调大，保证旋转后四角不露底。
+   方案：列数由数据侧（pickInitialColumnCount + applyColumnCount）决定，
+   不再用 CSS 隐藏末尾的列 —— 隐藏会把该列照片的唯一实例一起藏掉，
+   与「卡片数 = 照片数」直接冲突（这是记忆/04 里踩过的坑）。
+   这里只负责把倾斜角度调小、缩放调大，保证旋转后四角不露底。
    ================================================================ */
-@media (min-width: 768px) {
+/*
+  gap 三档必须与列数断点一一对应，否则会互相覆盖：
+  原先这里写 min-width:768px 给 10px，而下面 max-width:1023px 又给 8px，
+  两者特异性相同且后者靠后 —— 768~1023 区间实际一直是 8px，10px 从未生效。
+  现在按「>=1024 / 640~1023 / <640」三段切开，与 pickInitialColumnCount 对齐。
+*/
+@media (min-width: 1024px) {
   .cinema-cols {
-    /* 规格第 2 节：md 断点 gap 10px。改变量即可，
-       gap 与 padding-bottom 会一起跟上，无缝对齐不会被破坏。 */
     --cinema-gap: 10px;
   }
 }
 
 @media (max-width: 1023px) {
-  /* 保留 5 列（隐藏第 6、7 列） */
-  .cinema-col:nth-child(n + 6) {
-    display: none;
-  }
-
+  /* 列数由 COLUMN_BREAKPOINTS 在数据侧决定（此处 5 列），
+     不再用 nth-child 隐藏列 —— 隐藏会把该列照片的唯一实例一起藏掉。 */
   .cinema-cols {
     --cinema-gap: 8px;
   }
@@ -731,11 +792,7 @@ const isPaused = ref(false);
 }
 
 @media (max-width: 639px) {
-  /* 保留 4 列（隐藏第 5~7 列） */
-  .cinema-col:nth-child(n + 5) {
-    display: none;
-  }
-
+  /* 列数由数据侧决定（此处 4 列），同样不用 nth-child 隐藏。 */
   .cinema-page {
     /* 小屏导航同样是 60px 高，但总高度紧张，收一点留白 */
     padding-top: 88px;
