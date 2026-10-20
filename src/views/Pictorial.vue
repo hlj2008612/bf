@@ -767,6 +767,14 @@ const popoverStyle = computed(() => ({
 const POPOVER_GAP = 22;
 /** 弹层与视口边缘至少留出的距离。 */
 const POPOVER_MARGIN = 12;
+/**
+ * 固定导航栏占用的顶部高度（px）。导航 `.glass-nav` 是 fixed + top:20px + height:60px，
+ * 底边落在 80px；再留 10px 呼吸，取 90。窄屏导航 54px + top 20 = 74，88 足够。
+ * 【为什么弹层要避开它】导航 z-index 是 99999，弹层只有 2000，
+ * 一旦被钳制到顶部就会钻进导航底下，既挡住 logo 又点不到，等于弹层失效。
+ */
+const NAV_SAFE_TOP = 90;
+const NAV_SAFE_TOP_NARROW = 88;
 /** 参与「是否够放」判断时用的视口最小高度（手机软键盘/小窗会把它压到很小）。 */
 const POPOVER_FALLBACK_VW = 320;
 
@@ -833,10 +841,15 @@ function computePopoverPosition(rect, size) {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
 
+  // 顶部安全区：桌面让出固定导航，窄屏略收。钳制的下界不能再用 POPOVER_MARGIN，
+  // 否则 1280x720 这类高度不足的窗口会把弹层顶到 y=12、整块钻进导航栏底下。
+  const safeTop = vw <= 640 ? NAV_SAFE_TOP_NARROW : NAV_SAFE_TOP;
+
   const below = rect.bottom + POPOVER_GAP;
   const above = rect.top - POPOVER_GAP - size.height;
   const spaceBelow = vh - rect.bottom - POPOVER_GAP - POPOVER_MARGIN;
-  const spaceAbove = rect.top - POPOVER_GAP - POPOVER_MARGIN;
+  // spaceAbove 同样扣安全区：否则「上方更宽裕」会高估，翻上去之后又被钳回来。
+  const spaceAbove = rect.top - POPOVER_GAP - safeTop;
 
   // 翻转规则：下方放得下就放下方（参考站默认 side=bottom）；
   // 放不下且上方更宽裕就翻到上方；两边都不够时留在空间更大的那一侧，交给钳制贴边。
@@ -846,7 +859,7 @@ function computePopoverPosition(rect, size) {
   }
 
   let top = side === 'bottom' ? below : above;
-  top = clampNum(top, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, vh - POPOVER_MARGIN - size.height));
+  top = clampNum(top, safeTop, Math.max(safeTop, vh - POPOVER_MARGIN - size.height));
 
   // 水平：与锚点左边缘对齐，右侧出界时先尝试整体左移（仍保持 start 对齐语义），
   // 移不动再钳进视口。
@@ -910,6 +923,9 @@ function handleDocKeydown(e) {
   if (!activeCard.value) return;
   if (e.key === 'Escape' || e.key === 'Esc') {
     e.preventDefault();
+    // 【顺序】必须在 closePreview() 之前取锚点：reduce 分支会同步把 hoverAnchorEl 置 null，
+    // 放在后面会记下 null，等于没抑制（本轮真踩过，表现为 Esc 后 200ms 又弹回来）。
+    escSuppressedAnchor = hoverAnchorEl;
     closePreview();
     return;
   }
@@ -935,7 +951,10 @@ function attachGlobalListeners() {
   if (listenersBound) return;
   listenersBound = true;
   document.addEventListener('click', handleDocClick, true);
-  document.addEventListener('keydown', handleDocKeydown);
+  // 【capture 不能省】keydown 在按键时分「有焦点元素」与「无焦点元素」两条路径：
+  // 后者（刚进页面、点过空白处后）只在【捕获阶段】可靠派发，冒泡阶段收不到。
+  // 实测：同一时刻用 KeyboardEvent 派发能关，用真实按键关不掉 —— 就是漏在捕获阶段。
+  document.addEventListener('keydown', handleDocKeydown, true);
   window.addEventListener('scroll', handleViewportChange, { passive: true, capture: true });
   window.addEventListener('resize', handleViewportChange, { passive: true });
   window.addEventListener('mousemove', trackPointer, { passive: true });
@@ -945,7 +964,7 @@ function detachGlobalListeners() {
   if (!listenersBound) return;
   listenersBound = false;
   document.removeEventListener('click', handleDocClick, true);
-  document.removeEventListener('keydown', handleDocKeydown);
+  document.removeEventListener('keydown', handleDocKeydown, true);
   window.removeEventListener('scroll', handleViewportChange, { capture: true });
   window.removeEventListener('mousemove', trackPointer);
   window.removeEventListener('resize', handleViewportChange);
@@ -1029,11 +1048,24 @@ function openPreview(anchor, card) {
   });
 }
 
-/** 关闭弹层：先播 200ms 出场动画，再卸载 DOM 并解绑全局事件。 */
+/** 关闭弹层：先播出场动画（POPOVER_DURATION），再卸载 DOM 并解绑全局事件；reduce 下直接同步卸载。 */
 function closePreview() {
   if (!activeCard.value) return;
   clearHoverTimers();  // 关闭时作废在途的悬停定时器，避免它把弹层重新打开
-  const anim = prefersReducedMotion() ? 0 : POPOVER_DURATION;
+  // 【reduced-motion 必须同步卸载】全局规则把动画压成 animation: none !important，
+  // 于是【永远不会触发 animationend】。而 onPopoverAnimEnd 是卸载 DOM 的唯一路径（
+  // closeTimer 只是兜底，且同样依赖动画时长），所以这里不能指望事件：
+  // 直接把 DOM 拆掉，绕开动画。否则 reduce 用户打开弹层后 Esc 关不掉，弹层会永久停留。
+  if (prefersReducedMotion()) {
+    detachGlobalListeners();
+    clearCloseTimer();
+    activeCard.value = null;
+    popoverAnim.value = 'idle';
+    popoverAnchor = null;
+    hoverAnchorEl = null;
+    return;
+  }
+  const anim = POPOVER_DURATION;
   popoverAnim.value = 'closing';
   detachGlobalListeners();
   clearCloseTimer();
@@ -1073,6 +1105,15 @@ let hoverCloseTimer = 0;
 
 /** 当前资料卡的头像按钮（用来在关闭前判断指针是否还在头像附近）。 */
 let hoverAnchorEl = null;
+/**
+ * Esc 关闭后抑制重开，但【只对被按 Esc 时所在的那个头像生效】。
+ *
+ * 为什么不用一个全局布尔：全局布尔要靠「一定有某次 mouseleave 发生」来解除，
+ * 而键盘用户 Esc 后直接 Tab 到下一张头像时，下一次 onAvatarEnter 已经先于
+ * 解除被执行，会白吞一次聚焦（审查发现）。改成记录锚点后，别的头像照常弹出，
+ * 无需依赖任何离开事件即可自愈。
+ */
+let escSuppressedAnchor = null;
 /** 最近一次指针位置，关闭前用它判断指针是否还在头像与弹层之间的空隙里。 */
 let lastPointerX = 0;
 let lastPointerY = 0;
@@ -1107,6 +1148,9 @@ function onAvatarEnter(e, card) {
   hoverAnchorEl = anchor;   // 关闭前要用它判断指针是否还在头像附近
   // 已经在显示同一张，不用重开（避免从弹层移回头像时反复重播入场动画）
   if (activeCard.value && activeCard.value.uid === card.uid) return;
+  // 【Esc 抑制重开】Esc 关闭后，指针可能仍停在头像上。若此时再走延迟打开，
+  // 用户按 Esc 就变成了「关掉又自己弹回来」。只有指针真正离开头像（onAvatarLeave）才解除抑制。
+  if (escSuppressedAnchor && escSuppressedAnchor === anchor) return;
   hoverOpenTimer = setTimeout(() => {
     hoverOpenTimer = 0;
     clearCloseTimer();
@@ -1129,6 +1173,8 @@ function onCardEnter() {
  * 所以 blur 走独立分支：只在焦点既不在头像也不在弹层里时才关。
  */
 function onAvatarLeave(viaBlur = false) {
+  // 指针离开头像/弹层即解除 Esc 抑制，下次悬停恢复正常弹出
+  escSuppressedAnchor = null;
   // 只认严格的 true：@mouseleave="onAvatarLeave" 这种写法会把 MouseEvent
   // 当参数传进来，事件对象是 truthy，会被误判成 blur 分支（本轮真踩过）。
   const isBlur = viaBlur === true;
@@ -1285,6 +1331,7 @@ const onPopoverAnimEnd = (e) => {
   activeCard.value = null;
   popoverAnim.value = 'idle';
   popoverAnchor = null;
+  hoverAnchorEl = null;
 };
 
 /**
@@ -1890,7 +1937,7 @@ columns.value = assignColumns(columnCount.value);
      box-shadow 0 24px 64px rgba(0,0,0,.5)
      backdrop-filter blur(24px) saturate(1.5) / overflow hidden
      出现在锚点下方、左对齐（data-side=bottom / data-align=start），间距 22px
-     200ms 淡入 + scale .95→1 + 从顶部滑入 8px
+    300ms 淡入 + scale .95→1 + 从顶部滑入 8px，曲线 cubic-bezier(.16,1,.3,1)
    本项目适配的部分都在「内容区 / 定位 / 无障碍」三块，已在各处单独注明。
 
    ⚠️ scoped 与 Teleport：Vue 3 会把 scope id 打到 Teleport 出去的内容上，
@@ -1913,8 +1960,13 @@ columns.value = assignColumns(columnCount.value);
   /* 弹层里的图片与文字都不要被选中/拖拽（拖拽会触发浏览器原生 ghost image） */
   user-select: none;
   -webkit-user-select: none;
-  /* 提升为独立合成层，避免每帧重新计算 backdrop-filter 的采样区域 */
-  will-change: transform, opacity;
+  /* 浮层没有 popper wrapper，top/left 直接落在锚点附近，
+     所以元素左上角就是「靠近锚点的角」——展开原点取 0 0。
+     这不是照抄参考站的 0 0：参考站那层的 scale 恒为 1，0 0 在它那里不产生视觉；
+     我方是真的在缩放，原点选错会变成「从中心胀开」。 */
+  transform-origin: 0 0;
+  /* will-change 不做常驻：常驻会让元素整个生命周期占一个合成层，
+     20 张卡反复悬停时层反复创建销毁。只在动画期声明（见 .is-open / .is-closing）。 */
 }
 
 /*
@@ -1926,10 +1978,12 @@ columns.value = assignColumns(columnCount.value);
  * 项目里已有 ptr-*（main.css）与 cinema*（Cinema.vue）。
  */
 .card-popover.is-open {
+  will-change: transform, opacity;
             animation: cardPopoverIn 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
 }
 
 .card-popover.is-closing {
+  will-change: transform, opacity;
   animation: cardPopoverOut 200ms cubic-bezier(0.4, 0, 1, 1) both;
   pointer-events: none;
 }
@@ -1959,10 +2013,11 @@ columns.value = assignColumns(columnCount.value);
 /*
  * 翻到锚点上方时，从下方滑入、向上收起 —— 位移动画必须跟着翻转方向，
  * 否则「在下方弹出却从上面滑下来」会有一次穿模感。
- * transform-origin 同理：从靠近锚点的那条边展开。
+ * transform-origin 同理：水平统一取 0（与 data-align=start 一致），
+ * 垂直取靠近锚点的那条边 —— 下方弹出 0 0（顶边贴锚点），上方弹出 0 100%（底边贴锚点）。
  */
 .card-popover[data-side='top'] {
-  transform-origin: 50% 100%;
+  transform-origin: 0 100%;
 }
 
 .card-popover[data-side='top'].is-open {
