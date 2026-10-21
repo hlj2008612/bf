@@ -23,6 +23,10 @@ function isEditableTarget(el) {
 // 按下：记录起点，停止惯性
 function onPointerDown(e) {
     if (e.button !== undefined && e.button !== 0) return;
+    // 【多指】第二根手指落下时不重置起点。否则双指手势里后落的那根手指
+    // 会把 lastMouseX/Y 跳过去，画面瞬间跳一截；直接忽略后到的触点，
+    // 拖拽继续跟第一根手指走（"第一个按下的触点"是既定行为，语义不变）。
+    if (state.isDragging) return;
     stopInertia();
     state.isDragging = true;
     const p = getPos(e);
@@ -70,8 +74,11 @@ function onPointerMove(e) {
 }
 
 // 松手：计算平均速度，触发惯性
-function onPointerUp() {
+// 【多指】抬起任意一根手指时若还有别的触点留在屏幕上，说明拖拽并未结束，
+// 不触发惯性（原来两指交替抬起时会突然飞出去）。
+function onPointerUp(e) {
     if (!state.isDragging) return;
+    if (e && e.touches && e.touches.length) return;
     state.isDragging = false;
     if (state.moveDxHistory.length) {
         state.velocityX = state.moveDxHistory.reduce((a, b) => a + b, 0) / state.moveDxHistory.length;

@@ -360,6 +360,11 @@ const logout = () => {
   .glass-nav {
     box-sizing: border-box;
     width: 94%; height: 54px; padding: 0 12px; border-radius: 27px;
+    /* 【安全区】刘海屏 / 圆角屏横屏时导航别贴着物理边缘。
+       桌面端（>=768px）与竖屏手机（env 全为 0）位置完全不变。
+       注意 left 仍然保持 50%：居中靠的是 transform: translateX(-50%)，
+       换成 calc 会与收起态那条 transform 规则打架，故只补 top。 */
+    top: calc(20px + env(safe-area-inset-top, 0px));
     /* 移动端导航更矮（54px），收起幅度同步收小但仍大于底边 20+54=74px。
        只覆盖变量，不用重写整条 transform —— 收起态的规则自动跟着变。 */
     --nav-hide-y: -94px;
@@ -370,6 +375,45 @@ const logout = () => {
   .nav-link { font-size: 12px; padding: 6px 8px; white-space: nowrap; }
   .nav-right { flex-shrink: 0; }
   .logout-btn { font-size: 12px; padding: 6px 8px; gap: 4px; white-space: nowrap; }
+}
+
+/* ---------------------------------------------------------------
+   触控目标 >= 44px（docs/mobile-spec.md 验收第 2 条）
+
+   【为什么用「隐形扩展区」而不是把导航撑高】
+   实测基线（320/375/390/414）：.nav-link 只有 28px 高、.logout-btn 只有 30px，
+   都低于 44px 的可触控下限。但导航条本身只有 54px 高，把链接直接撑到 44px
+   会连带把整条导航变高、把文字挤成近方形色块 —— 那是可见的视觉变化。
+
+   这里的做法：链接自身的盒子一点不动（文字位置、胶囊尺寸、导航高度全部不变），
+   只用一个居中的 ::after 把【可点击区域】沿垂直方向向上下各扩到 44px。
+   · 伪元素是链接的子节点，点击仍然落在 <a> 上，键盘/读屏行为完全不变；
+   · 扩展区左右各内缩 2px，相邻链接之间留出互不重叠的间隙；
+   · 44px 与浏览器 62px(54+上下各 4px 外边距) 的触控去重半径一致，
+     不会和页面里其它元素抢同一片触摸区。
+
+   【只作用于移动端】下面整块都包在 @media (max-width: 767px) 里，
+   桌面端（>=1024px）与平板宽度不受任何影响。
+   --------------------------------------------------------------- */
+@media (max-width: 767px) {
+  .nav-link,
+  .logout-btn {
+    -webkit-touch-callout: none;
+    touch-action: manipulation;
+  }
+  /* .logout-btn 需要 position: relative 才能给伪元素定位；
+     桌面端它是 flex 容器、位置由 .nav-right 决定，这里加定位不会移动它 */
+  .logout-btn { position: relative; }
+  .nav-link::after,
+  .logout-btn::after {
+    content: '';
+    position: absolute;
+    /* 链接已左右各留 3~4px 间距，扩展区再各内缩 2px，相邻链接不重叠 */
+    left: 2px; right: 2px;
+    top: 50%;
+    height: 44px;
+    transform: translateY(-50%);
+  }
 }
 
 /* ---------------------------------------------------------------
@@ -387,7 +431,8 @@ const logout = () => {
    全局规则里的 animation-* 压不到任何东西，多写一条是无意义的重复定义。
    --------------------------------------------------------------- */
 
-/* 400px 以下再收紧一档，保证四个导航项 + 退出按钮仍能在一行内放下。 */
+/* 400px 以下再收紧一档，保证四个导航项 + 退出按钮仍能在一行内放下。
+   注意：这一档只收内边距，不改任何触控区尺寸（上面 ::after 的 44px 照旧生效）。 */
 @media (max-width: 400px) {
   .glass-nav { width: 96%; padding: 0 8px; }
   .nav-left { gap: 6px; }

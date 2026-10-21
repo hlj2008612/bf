@@ -74,11 +74,29 @@ const handleClose = () => {
 }
 #canvas:active { cursor: grabbing; }
 
+/* 【移动端手势】画布自己接管单指拖拽（input.js 的 onPointerDown/Move 里
+   preventDefault 掉了 touchstart/touchmove），给浏览器一个明确声明：
+   · touch-action: none —— 不做浏览器原生平移 / 双击缩放的手势判定，
+     单指拖拽从第一帧就跟手，也不会触发 300ms 点击延迟；
+   · overscroll-behavior: none —— 双击放大到「先放大再拖动」时，手指拖到
+     边界不会把整页拖着上下弹（iOS Safari 的下拉刷新 / 橡皮筋同样被禁掉）。
+   桌面端只影响触控手势，鼠标行为（cursor / hover / wheel）完全不变。 */
+#canvas {
+  touch-action: none;
+  overscroll-behavior: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
 /* 右上角圆形关闭按钮 */
 .close-btn {
   position: fixed;
-  top: 24px;
-  right: 24px;
+  /* 【安全区】刘海 / 圆角屏下按钮要落在物理安全区内，否则可能被遮挡或误触。
+     env() 在非刘海设备（含全部桌面浏览器）上取不到值，自动回落到原来的 24px，
+     桌面端（>=1024px）位置一个像素都不变。 */
+  top: calc(24px + env(safe-area-inset-top, 0px));
+  right: calc(24px + env(safe-area-inset-right, 0px));
   z-index: 99998;
   width: 44px;
   height: 44px;
