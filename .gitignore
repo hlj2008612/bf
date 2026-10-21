@@ -25,3 +25,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# 用户临时投件的入口目录（内容已用数字编号收进 assets-src/images/zmq/，不纳入版本控制）
+新加照片/

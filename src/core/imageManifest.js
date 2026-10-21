@@ -54,6 +54,9 @@ export const IMAGE_POOL = [
     { id: 18, thumb: 'images/thumbnails/18.webp', full: 'images/full/18.webp', w: 420, h: 560, ratio: 0.75 },
     { id: 19, thumb: 'images/thumbnails/19.webp', full: 'images/full/19.webp', w: 420, h: 560, ratio: 0.75 },
     { id: 20, thumb: 'images/thumbnails/20.webp', full: 'images/full/20.webp', w: 420, h: 560, ratio: 0.75 },
+    { id: 21, thumb: 'images/thumbnails/21.webp', full: 'images/full/21.webp', w: 379, h: 560, ratio: 0.676786 },
+    { id: 22, thumb: 'images/thumbnails/22.webp', full: 'images/full/22.webp', w: 442, h: 560, ratio: 0.789286 },
+    { id: 23, thumb: 'images/thumbnails/23.webp', full: 'images/full/23.webp', w: 420, h: 560, ratio: 0.75 },
 ];
 
 /** 别名：IMAGE_MANIFEST 是同一份数据的历史名字。 */

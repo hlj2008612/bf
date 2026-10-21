@@ -5,7 +5,8 @@
  * Generates the responsive image tiers for the photo wall and the manifest the
  * renderer reads. Idempotent: running it twice produces byte-identical output.
  *
- *   public/images/zmq/<N>.jpg          (source, NEVER modified by this script)
+ *   assets-src/images/zmq/<N>.jpg      (source, NEVER modified by this script)
+ *   assets-src/images/zmq-new/*.jpg    (new arrivals, copied in as 21.jpg, 22.jpg, ...)
  *     -> public/images/thumbnails/<N>.webp   longest edge 560px, q78, method 6
  *     -> public/images/full/<N>.webp         longest edge 1600px, q80, method 6
  *     -> src/core/imageManifest.js
@@ -28,7 +29,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
 const PATHS = {
-  src: path.join(ROOT, 'public', 'images', 'zmq'),
+  // 原图不进 public（它们有 97+ MB，会被原样打进 dist）。项目里只有这一处目录约定。
+  src: path.join(ROOT, 'assets-src', 'images', 'zmq'),
   thumbDir: path.join(ROOT, 'public', 'images', 'thumbnails'),
   fullDir: path.join(ROOT, 'public', 'images', 'full'),
   manifest: path.join(ROOT, 'src', 'core', 'imageManifest.js'),
