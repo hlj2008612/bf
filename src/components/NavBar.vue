@@ -5,7 +5,7 @@
     不在 JS 里写死数值，也不再走内联 style —— 避免内联 transform 压掉
     .glass-nav 原本的 translateX(-50%) 居中变换（两者必须写在同一条 transform 里）。
   -->
-  <nav class="glass-nav" :class="{ 'is-hidden': navHidden }" @mousedown.stop @wheel.stop>
+  <nav class="glass-nav" :class="{ 'is-hidden': navHidden, 'is-menu-open': menuOpen }" @mousedown.stop @wheel.stop>
     <div class="nav-left">
       <span class="logo">✦ 美琴子 ✦</span>
       <div class="nav-items">
@@ -27,8 +27,69 @@
       <a href="#" @click.prevent="logout" class="logout-btn">
         <span class="icon">⏻</span> 退出
       </a>
+      <!--
+        汉堡按钮：只在手机端（<=767px）显示，桌面端 display:none 不占位。
+        aria-expanded / aria-controls 让读屏软件知道这是可展开控件、以及它控制哪个节点。
+        aria-controls 用条件绑定：抽屉在 v-if 关闭时节点不存在，写死 id 会成为悬空引用。
+      -->
+      <button
+        ref="burgerRef"
+        class="nav-burger"
+        type="button"
+        :aria-expanded="menuOpen ? 'true' : 'false'"
+        :aria-controls="menuOpen ? 'mobile-menu' : undefined"
+        :aria-label="menuOpen ? '关闭菜单' : '打开菜单'"
+        @click.stop="toggleMenu"
+      >
+        <svg v-if="!menuOpen" aria-hidden="true" viewBox="0 0 24 24" width="18" height="18"
+             fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <line x1="4" y1="7" x2="20" y2="7" />
+          <line x1="4" y1="12" x2="20" y2="12" />
+          <line x1="4" y1="17" x2="20" y2="17" />
+        </svg>
+        <svg v-else aria-hidden="true" viewBox="0 0 24 24" width="18" height="18"
+             fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+          <line x1="6" y1="6" x2="18" y2="18" />
+          <line x1="18" y1="6" x2="6" y2="18" />
+        </svg>
+      </button>
     </div>
   </nav>
+
+  <!--
+    手机端菜单抽屉。桌面端由 CSS 整体 display:none（.nav-drawer 的基础规则）。
+    fixed 定位 + 高 z-index，挂在 NavBar 内部即可，不会被其他层叠上下文截断。
+    点空白处关闭：@click.self 只响应落在遮罩本身的点击，卡片内部的点击不会冒泡触发。
+    tabindex="-1" + ref：抽屉要能被程序化聚焦（见 focusDrawer），兑现 aria-modal 的承诺。
+  -->
+  <div
+    v-if="menuOpen"
+    id="mobile-menu"
+    ref="drawerRef"
+    tabindex="-1"
+    class="nav-drawer"
+    role="dialog"
+    aria-modal="true"
+    aria-label="站点导航"
+    @click.self="closeMenu"
+  >
+    <div class="nav-drawer-grid">
+      <button
+        v-for="item in navItems"
+        :key="item.path"
+        type="button"
+        class="nav-card"
+        :class="{ 'is-current': currentPath === item.path }"
+        :style="{ '--card-color': item.color }"
+        @click="handleCardNavigate(item)"
+      >
+        <span class="nav-card-icon" aria-hidden="true" v-html="item.icon"></span>
+        <span class="nav-card-name">{{ item.name }}</span>
+        <span class="nav-card-en">{{ item.title }}</span>
+      </button>
+    </div>
+    <button type="button" class="nav-drawer-logout" @click="logoutFromMenu">⏻ 退出登录</button>
+  </div>
 </template>
 
 <script setup>
@@ -47,12 +108,32 @@ const navHidden = ref(false);
 // 都会让胶囊跑到错误的元素上。改为模板 ref + 按索引取值，不再有全局查找。
 const linkRefs = ref([]);
 
+// icon 是抽屉卡片里的内联 SVG 字符串（v-html 注入）。
+// 【安全性】navItems 是模块级常量、字符串在源码里写死，不来自任何外部输入，
+// 因此不存在 XSS 风险。若将来改成从接口/CMS 读取，必须换成组件或白名单过滤。
+// 描边颜色由 CSS 的 currentColor 决定，跟随 .nav-card 的 --card-color 主题色。
 const navItems = [
-  { name: '首页', path: '/', title: 'HOME', color: '#8b6ce8' },
-  { name: '照片墙', path: '/wall', title: 'GALLERY', color: '#4a9eff' },
-  { name: '影院', path: '/cinema', title: 'CINEMA', color: '#e4bb38' },
-  { name: '画报', path: '/pictorial', title: 'PICTORIAL', color: '#a3e635' }
+  { name: '首页', path: '/', title: 'HOME', color: '#8b6ce8',
+    icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>' },
+  { name: '照片墙', path: '/wall', title: 'GALLERY', color: '#4a9eff',
+    icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>' },
+  { name: '影院', path: '/cinema', title: 'CINEMA', color: '#e4bb38',
+    icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="20" rx="2"/><path d="M7 2v20M17 2v20M2 12h20M2 7h5M2 17h5M17 7h5M17 17h5"/></svg>' },
+  { name: '画报', path: '/pictorial', title: 'PICTORIAL', color: '#a3e635',
+    icon: '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/></svg>' }
 ];
+/*
+ * 手机端抽屉的状态位。
+ * 【声明位置很关键】这些 ref 必须定义在 onScroll / updatePill / watch 之前 ——
+ * 它们在 onScroll 里被读取做守卫，而 const 有暂时性死区（TDZ），
+ * 若 onScroll 在 setup 执行完成前被调用就会抛 ReferenceError。
+ * 放到文件靠后虽然平时能跑，但属于随时会炸的隐患。
+ */
+const menuOpen = ref(false);
+
+// 汉堡按钮与抽屉的模板 ref，用于焦点管理。
+const burgerRef = ref(null);
+const drawerRef = ref(null);
 
 // 计算胶囊宽度和位置（v-for 里的 ref 数组顺序与 navItems 一致）
 const updatePill = () => {
@@ -63,6 +144,11 @@ const updatePill = () => {
   // 用 getBoundingClientRect 相对 .nav-items 测量，避免依赖 offsetParent 链
   const activeEl = els.find((el) => el && el.classList.contains('active')) || els[idx];
   if (!activeEl) return;
+
+  // 【祖先被 display:none 时直接放弃】抽屉打开时 .nav-items 被隐藏，
+  // 此时所有 rect 都是 0，算出来的 pill 会变成 0 宽贴左，等抽屉关掉再跳回来。
+  // offsetParent 为 null 是「自身或祖先 display:none」的可靠判据。
+  if (activeEl.offsetParent === null) return;
 
   const parent = activeEl.offsetParent || activeEl.parentElement;
   if (!parent) return;
@@ -187,6 +273,10 @@ const onScroll = (e) => {
   // 转场覆盖层激活期间不参与收起逻辑（规格第一节第 5 条），避免转场中导航栏乱动。
   if (document.documentElement.hasAttribute('data-ptr-active')) return;
 
+  // 抽屉打开时不做收起判断：抽屉是 fixed 全屏遮罩，背后的滚动不该让导航条
+  // 从遮罩下面被顶走（.glass-nav 的 z-index 比抽屉高，收起来会露馅）。
+  if (menuOpen.value) return;
+
   const y = readScrollTop(e);
 
   // 【不能只靠 rAF】后台标签页 / 页面隐藏时 rAF 会被完全暂停，
@@ -275,6 +365,135 @@ const logout = () => {
   }
   emit('logout');
 };
+
+/* ==========================================================================
+   手机端抽屉（<=767px）
+
+   桌面端整块不生效：.nav-burger / .nav-drawer 的基础规则都是 display:none，
+   只有 @media (max-width: 767px) 里才把它们显示出来。
+   抽屉的 DOM 用 v-if 控制，关闭时完全不渲染，不占内存也不参与合成。
+   ========================================================================== */
+
+/** 开合抽屉。按钮用 @click.stop，避免这次点击冒泡到 @click.self 被立刻关掉。 */
+const toggleMenu = () => {
+  menuOpen.value = !menuOpen.value;
+};
+
+/*
+ * 关闭抽屉。
+ * 【restoreFocus】默认把焦点还给汉堡按钮 —— 但「点了卡片要导航」这条路径不能还，
+ * 因为紧接着就会触发 ptr 转场并整页替换，焦点扔回一个即将消失的按钮反而更糟。
+ */
+const closeMenu = (restoreFocus = true) => {
+  if (!menuOpen.value) return;
+  menuOpen.value = false;
+  if (restoreFocus) {
+    nextTick(() => {
+      // focus({ preventScroll }) 避免回焦时页面跳动。
+      // 【只在键盘操作时回焦】触屏点遮罩关闭后把焦点塞回汉堡，
+      // 移动端会残留一圈 :focus-visible 紫色描边，观感很差。
+      if (burgerRef.value && lastInputWasKeyboard) {
+        burgerRef.value.focus({ preventScroll: true });
+      }
+    });
+  }
+};
+
+// 最近一次输入是否来自键盘。用于决定关闭抽屉后要不要回焦汉堡，见 closeMenu。
+let lastInputWasKeyboard = false;
+const markKeyboard = () => { lastInputWasKeyboard = true; };
+const markPointer = () => { lastInputWasKeyboard = false; };
+onMounted(() => {
+  window.addEventListener('keydown', markKeyboard, true);
+  window.addEventListener('pointerdown', markPointer, true);
+});
+
+/** 抽屉里点某张卡片：先关抽屉（不还焦点），再走与桌面端完全相同的导航路径。 */
+const handleCardNavigate = (item) => {
+  closeMenu(false);
+  handleNavigate(item);
+};
+
+/** 抽屉里的退出：与顶部退出按钮同一套逻辑。 */
+const logoutFromMenu = () => {
+  closeMenu(false);
+  logout();
+};
+
+/*
+ * 路由变化时自动收起抽屉。
+ * 用户可能通过浏览器后退、ptr 转场或程序化跳转离开，这些都不经过 handleCardNavigate，
+ * 若抽屉还开着会盖在新页面上。
+ */
+watch(
+  () => route.path,
+  () => {
+    closeMenu(false);
+  }
+);
+
+/*
+ * 抽屉打开时锁滚动 + 响应 Escape。
+ *
+ * 【为什么要锁滚动】抽屉是全屏遮罩，背后内容若还能滚动，触摸滑动会穿透到
+ * 下层页面，观感很差（iOS 上尤其明显）。
+ *
+ * 【为什么用 null 哨兵而不是空字符串】
+ *   src/assets/main.css 已经把 html/body 设成 overflow:hidden，所以
+ *   document.body.style.overflow（内联样式）初值本来就是空字符串。
+ *   若无条件写回空串，会在 <body> 上留下内联空声明；
+ *   更严重的是：一旦原值被存成 'hidden'（重复触发打开流程），关闭时
+ *   就把 'hidden' 当原值写回去，滚动锁会永久粘死。
+ *   改成：只有确实锁过（savedOverflow !== null）才还原，还原后立刻置回 null。
+ */
+let savedOverflow = null;
+
+/*
+ * Esc 关闭抽屉。
+ * 【为什么要看 defaultPrevented】画报页（Pictorial.vue）在 document 捕获阶段
+ * 也会处理 Esc 并 preventDefault，两处独立处理会在一次按键里同时关掉浮层和抽屉。
+ */
+function onKeydown(e) {
+  if (e.defaultPrevented) return;
+  if (e.key === 'Escape' && menuOpen.value) {
+    e.preventDefault();
+    closeMenu();
+  }
+}
+
+const lockScroll = () => {
+  if (savedOverflow !== null) return;          // 已锁过，幂等
+  savedOverflow = document.body.style.overflow;
+  document.body.style.overflow = 'hidden';
+  window.addEventListener('keydown', onKeydown);
+};
+
+const unlockScroll = () => {
+  if (savedOverflow === null) return;          // 本来就没锁
+  document.body.style.overflow = savedOverflow;
+  savedOverflow = null;
+  window.removeEventListener('keydown', onKeydown);
+};
+
+watch(menuOpen, async (open) => {
+  if (open) {
+    lockScroll();
+    // 打开后把焦点移进抽屉，兑现 aria-modal="true" 的承诺。
+    // 等一帧：v-if 刚创建节点，此时才能聚焦。
+    await nextTick();
+    if (drawerRef.value) drawerRef.value.focus();
+  } else {
+    unlockScroll();
+  }
+});
+
+// 组件卸载时（退出到登录页、或整个 NavBar 被 v-if 摘掉）必须还原，
+// 否则 body 会一直保持 overflow:hidden。unlockScroll 幂等，未锁过时什么也不写。
+onUnmounted(() => {
+  unlockScroll();
+  window.removeEventListener('keydown', markKeyboard, true);
+  window.removeEventListener('pointerdown', markPointer, true);
+});
 </script>
 
 <style scoped>
@@ -441,4 +660,165 @@ const logout = () => {
   .nav-link { font-size: 12px; padding: 6px 6px; }
   .logout-btn { padding: 6px 6px; }
 }
+
+/* ==========================================================================
+   手机端抽屉样式（仅在 <=767px 生效）
+
+   【桌面端隔离】.nav-burger 与 .nav-drawer 的【基础规则】都是 display:none，
+   所以桌面端这两个元素根本不参与布局，宽度为 0，不占位、不可见、不可聚焦。
+   所有视觉样式都写在下面的 @media (max-width: 767px) 里。
+   ========================================================================== */
+.nav-burger { display: none; }
+.nav-drawer { display: none; }
+
+@media (max-width: 767px) {
+  /* 汉堡按钮：40x40 玻璃圆钮。
+     ::after 把可点区域撑到 44x44 —— 复用项目里 .nav-link 已有的同款做法，
+     这样视觉尺寸不变（与参考站的 40x40 一致），但满足 44px 触控标准。 */
+  .nav-burger {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    flex: 0 0 auto;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.9);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: background 0.2s ease, border-color 0.2s ease;
+  }
+  .nav-burger::after {
+    content: '';
+    position: absolute;
+    inset: -2px;   /* 40 + 2*2 = 44px 触控面积 */
+  }
+  .nav-burger:hover {
+    background: rgba(255, 255, 255, 0.12);
+    border-color: rgba(255, 255, 255, 0.22);
+  }
+  .nav-burger:focus-visible {
+    outline: 2px solid rgba(139, 108, 232, 0.9);
+    outline-offset: 2px;
+  }
+
+  /* 抽屉打开时，导航条里的文字链接与退出按钮让位给抽屉里的卡片，
+     顶部只保留 logo 与关闭（×）按钮 —— 与参考站的展开形态一致。
+     注意：被隐藏的只有 .nav-items 与 .logout-btn，汉堡按钮本身保持可见可聚焦。 */
+  .glass-nav.is-menu-open .nav-items,
+  .glass-nav.is-menu-open .nav-right .logout-btn { display: none; }
+
+  /* 全屏抽屉遮罩 */
+  .nav-drawer {
+    position: fixed;
+    inset: 0;
+    z-index: 99998;          /* 低于 .glass-nav(99999)，保证导航条与关闭按钮浮在上面 */
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: calc(96px + env(safe-area-inset-top, 0px)) 20px calc(24px + env(safe-area-inset-bottom, 0px));
+    background: rgba(0, 0, 0, 0.55);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    overflow-y: auto;
+    animation: navDrawerIn 0.22s ease-out both;
+  }
+  /* 抽屉自身获焦（tabindex=-1）时不要画焦点圈，视觉上会是个大边框 */
+  .nav-drawer:focus { outline: none; }
+
+  @keyframes navDrawerIn {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
+  /* 2x2 卡片网格 */
+  .nav-drawer-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    width: 100%;
+    max-width: 420px;
+  }
+
+  .nav-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-height: 104px;
+    padding: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #fff;
+    text-align: left;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+    transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+  }
+  .nav-card:active { transform: scale(0.97); }
+  .nav-card:focus-visible {
+    outline: 2px solid var(--card-color, #8b6ce8);
+    outline-offset: 2px;
+  }
+
+  /* 当前所在页：用该页自己的主题色描边 + 淡底 */
+  .nav-card.is-current {
+    border-color: color-mix(in srgb, var(--card-color, #8b6ce8) 50%, transparent);
+    background: color-mix(in srgb, var(--card-color, #8b6ce8) 10%, transparent);
+  }
+
+  .nav-card-icon {
+    display: flex;
+    color: var(--card-color, #8b6ce8);
+  }
+  .nav-card-icon :deep(svg) { width: 24px; height: 24px; }
+
+  .nav-card-name {
+    margin-top: auto;      /* 名称与英文一起沉到卡片底部 */
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.2;
+  }
+  .nav-card-en {
+    font-size: 9px;
+    letter-spacing: 0.22em;
+    color: rgba(255, 255, 255, 0.4);
+    line-height: 1;
+  }
+
+  .nav-drawer-logout {
+    width: 100%;
+    max-width: 420px;
+    min-height: 48px;
+    padding: 0 16px;
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 16px;
+    background: rgba(255, 255, 255, 0.05);
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 14px;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+  .nav-drawer-logout:active { background: rgba(255, 255, 255, 0.10); }
+  .nav-drawer-logout:focus-visible {
+    outline: 2px solid rgba(255, 70, 70, 0.9);
+    outline-offset: 2px;
+  }
+}
+
+/*
+ * 减少动效偏好：main.css 有一条全局规则把 animation-duration 压到 0.01ms，
+ * 这里给抽屉的入场动画放行成 0.01ms 即可（它只是淡入，没有状态机依赖 animationend），
+ * 不需要像 ptr 转场那样保留完整时长 —— 直接让它瞬时出现反而是正确的降级。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .nav-drawer { animation-duration: 0.01ms !important; }
+}
+
 </style>
