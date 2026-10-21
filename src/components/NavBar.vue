@@ -1,5 +1,11 @@
 <template>
-  <nav class="glass-nav" @mousedown.stop @wheel.stop>
+  <!--
+    :class 的 hidden 状态给 CSS 提供 translateY(--nav-hide-y)。
+    收起幅度由 CSS 变量 --nav-hide-y 决定（默认 -99px，移动端断点覆盖为 -94px），
+    不在 JS 里写死数值，也不再走内联 style —— 避免内联 transform 压掉
+    .glass-nav 原本的 translateX(-50%) 居中变换（两者必须写在同一条 transform 里）。
+  -->
+  <nav class="glass-nav" :class="{ 'is-hidden': navHidden }" @mousedown.stop @wheel.stop>
     <div class="nav-left">
       <span class="logo">✦ 美琴子 ✦</span>
       <div class="nav-items">
@@ -34,6 +40,7 @@ const route = useRoute();
 
 const currentPath = ref(route.path);
 const pillStyle = ref({});
+const navHidden = ref(false);
 
 // 【修复】原来用 document.querySelector('.nav-link.active') 做全局查询：
 // 依赖 DOM 里恰好只有一个 .active 元素，任何同名类（比如页面里别处的 .active）
@@ -78,13 +85,158 @@ watch(
   }
 );
 
+/* ==========================================================================
+   滚动收起 / 展开（规格见 docs/nav-scroll-and-popover-spec.md 第一节）
+
+   【实测数值（来自规格，主理人用真 Chrome 实测参考站）】
+     · 向下累计 100px      → 收起
+     · 向下累计 1px / 50px → 不动
+     · 收起后向上累计 1/2/5px → 仍收起
+     · 收起后向上累计 10px    → 展开
+   → 明显的滞后（hysteresis）：向下阈值远大于向上阈值。
+
+   【实现分工】
+     · 收起/展开的「视觉」全部交给 CSS：.glass-nav 常驻 transition，
+       .glass-nav.is-hidden 时 transform 加一段 translateY(-99px)。
+       JS 只负责切换一个布尔量，不写内联 style。
+     · 为什么不用内联 style='transform: translateY(...)'：根元素原本就靠
+       transform: translateX(-50%) 水平居中，内联 transform 会把它整个覆盖掉，
+       导航栏会瞬间跳到视口左侧。两者必须写在同一条 transform 里（CSS 里处理）。
+
+   【阈值选择】取 HIDE_DOWN = 100 / SHOW_UP = 10：两端都落在实测结论的正中间
+   （规格给的区间是 80~100 与 8~10，实测点恰好是 100 与 10）。
+   ========================================================================== */
+const HIDE_DOWN = 100;    // 向下累计多少 px 收起
+const SHOW_UP = 10;       // 收起后向上累计多少 px 展开
+const EPS = 0.5;          // 亚像素抖动容差（浮点 / 缩放下 deltaY 不一定是整数）
+
+let lastY = 0;            // 上一帧记录的滚动位置
+let accDown = 0;          // 尚未触发收起的向下累计位移（展开态持续累加）
+let accUp = 0;            // 尚未触发展开的向上累计位移（收起态持续累加）
+let ticking = false;      // rAF 节流标志
+let rafId = 0;
+let pendingY = 0;         // 本帧待处理的最新滚动位置（同帧多次事件只保留最后一次）
+
+/**
+ * 读取当前滚动位置。
+ *
+ * 【不能直接读 window.scrollY】本站在 main.css / App.vue 里把 html / body / #app
+ * 全部钉成 overflow:hidden —— 页面滚不动，真正滚动的是各个视图自己的
+ * overflow:auto 容器（例如画报页的 .pictorial-page）。这些容器的 scroll 事件
+ * 不冒泡到 window，只能用 capture 阶段在 window 上接住。
+ * 因此在事件里就近取「实际滚动的那个元素」的 scrollTop 作为权威值。
+ *
+ * @param {Event} [e] scroll 事件（capture 阶段）
+ * @returns {number} 当前滚动位置（px）
+ */
+const readScrollTop = (e) => {
+  const t = e && e.target;
+  // document 是 window 自己滚动时的事件目标；Scroll 事件里的 target 是滚动元素。
+  if (t && t.nodeType === 1 && typeof t.scrollTop === 'number' && t !== document.documentElement && t !== document.body) {
+    return t.scrollTop;
+  }
+  const de = document.documentElement;
+  const bodyTop = document.body ? document.body.scrollTop : 0;
+  const winY = window.scrollY || window.pageYOffset || 0;
+  // 取三者最大值：document 滚动时 scrollTop 落在 documentElement（标准模式）或 body（怪异模式），
+  // 视口滚动（visualViewport）时才只有 window.scrollY 有值。
+  return Math.max(de ? de.scrollTop : 0, bodyTop || 0, winY);
+};
+
+/** 真正处理一帧：算出方向和累计量，再决定收起/展开。 */
+const applyScrollState = (y) => {
+  const dy = y - lastY;
+
+  // 顶部边界：scrollY <= 0 时无条件展开（回到页首一定看得见导航）。
+  if (y <= 0) {
+    lastY = 0;
+    accDown = 0;
+    accUp = 0;
+    navHidden.value = false;
+    return;
+  }
+
+  lastY = y;
+
+  if (dy > EPS) {
+    // 向下：累加向下距离，并清零向上累计（方向反转即重新计数）。
+    accUp = 0;
+    accDown += dy;
+    if (!navHidden.value && accDown >= HIDE_DOWN) {
+      navHidden.value = true;
+      accDown = 0;
+    }
+  } else if (dy < -EPS) {
+    // 向上：累加向上距离，并清零向下累计。
+    accDown = 0;
+    accUp += -dy;
+    if (navHidden.value && accUp >= SHOW_UP) {
+      navHidden.value = false;
+      accUp = 0;
+    }
+  }
+  // |dy| <= EPS：没有有效位移，什么都不做（保留当前累计量）。
+};
+
+/**
+ * 滚动监听入口 —— 只负责 rAF 节流，真正的计算在 applyScrollState。
+ * 【为什么用 rAF】一次触摸/滚轮滑动会连续派发几十个 scroll 事件，
+ * 逐个处理会反复读写状态；合并到每帧一次即可，且与浏览器的刷新节拍对齐。
+ */
+const onScroll = (e) => {
+  // 转场覆盖层激活期间不参与收起逻辑（规格第一节第 5 条），避免转场中导航栏乱动。
+  if (document.documentElement.hasAttribute('data-ptr-active')) return;
+
+  const y = readScrollTop(e);
+
+  // 【不能只靠 rAF】后台标签页 / 页面隐藏时 rAF 会被完全暂停，
+  // 挂起的回调要等回到前台才执行；此时直接同步补算，保证状态不会滞后一整个隐藏期。
+  if (document.hidden) {
+    if (rafId) {
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+      ticking = false;
+    }
+    applyScrollState(y);
+    return;
+  }
+
+  // 每次事件都刷新待处理值：同帧内多次触发只保留最后一次的位置，仍是权威的。
+  pendingY = y;
+  if (ticking) return;
+  ticking = true;
+  rafId = requestAnimationFrame(() => {
+    rafId = 0;
+    ticking = false;
+    applyScrollState(pendingY);
+  });
+};
+
 onMounted(() => {
   updatePill();
   window.addEventListener('resize', updatePill);
+
+  // 初值：刷新后浏览器常会恢复上一次的滚动位置，此时同步算一次，
+  // 保证「刷新时已经在页面下方」也能立刻是收起态，而不是先展开再收。
+  lastY = readScrollTop();
+  applyScrollState(lastY);
+
+  // capture: true 是必须的 —— 滚动容器不在 window 上，事件不会冒泡到 window。
+  window.addEventListener('scroll', onScroll, { passive: true, capture: true });
 });
 
 onUnmounted(() => {
   window.removeEventListener('resize', updatePill);
+
+  // 卸载时必须同时移除【监听】和【挂起的 rAF】：
+  // 前者用同一个函数引用（匿名函数移除不掉）；后者若继续跑，会对着已销毁的
+  // 组件改一个 ref 值 —— 虽不报错，但属于无意义的泄漏。
+  window.removeEventListener('scroll', onScroll, { capture: true });
+  if (rafId) {
+    cancelAnimationFrame(rafId);
+    rafId = 0;
+    ticking = false;
+  }
 });
 
 // 点击瞬间立即移动胶囊，然后才通知父组件导航。
@@ -126,9 +278,24 @@ const logout = () => {
 </script>
 
 <style scoped>
+/*
+ * 【滚动收起：为什么用 translateY 而不是 top】（规格 docs/nav-scroll-and-popover-spec.md 第一节）
+ *   · top 会触发 layout（每帧重排 + 重绘整条导航），transform 只走合成层；
+ *   · 收起幅度必须【大于整条导航的底边】才能完全移出视口：
+ *       桌面端 顶距 20 + 高 60 = 底边 80  →  99px 足够且留 19px 余量（与参考站同值）
+ *       移动端断点 顶距 20 + 高 54 = 底边 74 →  用 -94px（留 20px 余量）
+ *   · 基准位移 translateX(-50%) 必须和收起位移写进【同一条 transform】，
+ *     否则后在声明会把前者覆盖，导航栏会瞬间掉到视口左侧。
+ */
 .glass-nav {
   position: fixed; top: 20px; left: 50%;
-  transform: translateX(-50%);
+  --nav-hide-y: -99px;
+  transform: translateX(-50%) translateY(0);
+  /* 实测规格：transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) */
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  /* 提示浏览器把导航栏提升为独立合成层：滚动时只做变换，不参与页面重绘。
+     只写 will-change，不写 contain / transform-style，避免改动既有层叠上下文。 */
+  will-change: transform;
   width: 90%; max-width: 1200px; height: 60px;
   background: rgba(15, 15, 25, 0.6);
   backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
@@ -136,6 +303,10 @@ const logout = () => {
   display: flex; justify-content: space-between; align-items: center;
   padding: 0 24px; z-index: 99999;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 10px rgba(74, 158, 255, 0.2);
+}
+/* 收起态：只换 transform 里的第二段，居中位移保持不变。 */
+.glass-nav.is-hidden {
+  transform: translateX(-50%) translateY(var(--nav-hide-y));
 }
 .nav-left { display: flex; align-items: center; gap: 24px; }
 .logo {
@@ -189,6 +360,9 @@ const logout = () => {
   .glass-nav {
     box-sizing: border-box;
     width: 94%; height: 54px; padding: 0 12px; border-radius: 27px;
+    /* 移动端导航更矮（54px），收起幅度同步收小但仍大于底边 20+54=74px。
+       只覆盖变量，不用重写整条 transform —— 收起态的规则自动跟着变。 */
+    --nav-hide-y: -94px;
   }
   .nav-left { gap: 10px; min-width: 0; }
   .logo { font-size: 13px; letter-spacing: 0; white-space: nowrap; }
@@ -197,6 +371,21 @@ const logout = () => {
   .nav-right { flex-shrink: 0; }
   .logout-btn { font-size: 12px; padding: 6px 8px; gap: 4px; white-space: nowrap; }
 }
+
+/* ---------------------------------------------------------------
+   prefers-reduced-motion 的兜底说明
+
+   全局 main.css 在 reduce 下把 * 的 transition-duration 压到 0.01ms !important，
+   本组件的 transition: transform 同样被压掉。
+
+   【这不是「卡住」】收起/展开的状态只由 JS 切 .is-hidden 决定，CSS 只负责过渡过程；
+   过渡被压到 0.01ms 之后，状态切换依然立刻生效 —— 即「瞬间收起 / 瞬间展开」，
+   正是减少动态效果想要的结果。请勿在这里用 !important 把时长抢回来：
+   那会让系统开了「减少动态效果」的用户仍然看到滑动动画。
+
+   【为什么不补 animation: none !important】这里只有 transition、没有 keyframes，
+   全局规则里的 animation-* 压不到任何东西，多写一条是无意义的重复定义。
+   --------------------------------------------------------------- */
 
 /* 400px 以下再收紧一档，保证四个导航项 + 退出按钮仍能在一行内放下。 */
 @media (max-width: 400px) {

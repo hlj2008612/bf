@@ -718,8 +718,10 @@ const onTiltLeave = (e) => {
  *
  * 与本项目的差异（适配，不是遗漏）：
  *   1. 参考站内容是可滚动的用户资料卡；这里是一张按原比例显示的图片，
- *      所以高度由图片长宽比和视口决定，需要一套「翻转 + 钳制」的定位算法
+ *      所以高度由图片长宽比和视口决定，需要一套「翻转 + 横向钳制」的定位算法
  *      （参考站因为宽度固定、内容自适应，只需要简单的固定偏移）。
+ *      纵向【不钳制】：浮层始终贴在锚点边上、随锚点（含滚动）逐像素移动，
+ *      与参考站实测行为一致 —— 详见 computePopoverPosition 的注释。
  *   2. 大图走 assetUrl(entry.full)：表格里的 thumb 只有 560px，放大后必糊。
  *   3. 图上叠的编号用 padId()，不伪造点赞数（与卡片上的 0 一致）。
  */
@@ -747,7 +749,7 @@ const popoverAnim = ref('opening');
 /** 弹层的锚点元素（被点的那个头像按钮）。用普通变量而非 ref：不需要响应式。 */
 let popoverAnchor = null;
 
-/** 定位结果：side（bottom / top）、align（start / center[钳制后才出现]）、坐标。 */
+/** 定位结果：side（bottom / top）、align（start / center[横向钳制后才出现]）、坐标。 */
 const popoverState = reactive({ side: 'bottom', align: 'start', top: 0, left: 0 });
 
 /**
@@ -761,8 +763,8 @@ const popoverStyle = computed(() => ({
 
 /**
  * 锚点与弹层之间的间距（参考站实测 22px）。
- * 翻到上方 / 贴边钳制时这 22px 可能被压到更小 —— 如果为守住它而把弹层推出视口，
- * 那就是「看不见」，优先级明显更低：先保证看得见，再谈间距。
+ * 【现在是硬保证，不再被压缩】纵向不再把 top 钳进视口，所以浮层每一帧都严格
+ * 距锚点 22px（bottom: top = rect.bottom + 22；top: top = rect.top - 22 - height）。
  */
 const POPOVER_GAP = 22;
 /** 弹层与视口边缘至少留出的距离。 */
@@ -770,8 +772,9 @@ const POPOVER_MARGIN = 12;
 /**
  * 固定导航栏占用的顶部高度（px）。导航 `.glass-nav` 是 fixed + top:20px + height:60px，
  * 底边落在 80px；再留 10px 呼吸，取 90。窄屏导航 54px + top 20 = 74，88 足够。
- * 【为什么弹层要避开它】导航 z-index 是 99999，弹层只有 2000，
- * 一旦被钳制到顶部就会钻进导航底下，既挡住 logo 又点不到，等于弹层失效。
+ * 【现在只参与翻转判定，不再作为钳制下界】它决定「上方还剩多少可用空间」：
+ * 锚点本来就可能滚到导航底下，浮层跟过去被导航遮住是跟随的必然结果，
+ * 这不是定位错误（不再像以前那样把 top 硬拉到 90，反而与锚点脱开）。
  */
 const NAV_SAFE_TOP = 90;
 const NAV_SAFE_TOP_NARROW = 88;
@@ -795,7 +798,8 @@ const clampNum = (v, min, max) => Math.max(min, Math.min(max, v));
  * 首次渲染后测到的真实高度。0 = 还没测过。
  * 【为什么不能只用常量】入场动画会改变 rect，且浏览器缩放/字体设置会让高度浮动；
  * 偏差会让 computePopoverPosition 的 spaceBelow/spaceAbove 判断失真：
- * 判定「下方放得下」但实际渲染出来底部被视口裁掉，最下面的「查看大图」按钮就点不到了。
+ * 锚点靠近视口底部时，高度估小会让翻转判定误判为「下方放得下」，
+ * 于是浮层挂在锚点下方、信息条和「查看大图」按钮整块落在视口外点不到。
  * 【现在高度随图变化】所以缓存只对「当前这一张」有效，换卡时必须在 openPreview 里清零，
  * 否则上一张的实测高度会套到下一张，定位仍然错。
  */
@@ -833,6 +837,12 @@ function measurePopoverSize() {
  * 按锚点矩形与弹层尺寸算位置：优先下方，下方放不下就翻到上方；
  * 水平方向优先与锚点左边缘对齐（data-align=start），再钳进视口。
  *
+ * 【纵向不钳制 —— 这是本函数的核心语义】浮层始终 = 锚点边 + gap，
+ * 随锚点逐像素移动，允许底部超出视口被裁掉（与参考站实测一致：
+ * 锚点 248→浮层 308、锚点 181→235、锚点 106→157、锚点 26→77，
+ * 每次浮层位移都等于锚点位移）。以前把 top 钳进 [safeTop, vh-12-height]，
+ * 滚动后 below 一碰到上界就被钉死，于是「浮层不跟着锚点走」。
+ *
  * @param {DOMRect} rect 锚点矩形（来自 getBoundingClientRect）
  * @param {{width:number,height:number}} size 弹层尺寸
  * @returns {{side:'bottom'|'top', align:'start'|'center', top:number, left:number}}
@@ -841,8 +851,10 @@ function computePopoverPosition(rect, size) {
   const vw = window.innerWidth;
   const vh = window.innerHeight;
 
-  // 顶部安全区：桌面让出固定导航，窄屏略收。钳制的下界不能再用 POPOVER_MARGIN，
-  // 否则 1280x720 这类高度不足的窗口会把弹层顶到 y=12、整块钻进导航栏底下。
+  // 顶部安全区：桌面让出固定导航，窄屏略收。
+  // 【只用于判定「上方还剩多少空间够不够翻转」】不再作为 top 的下界：
+  // 用 POPOVER_MARGIN 当上界会把 1280x720 这类矮窗口的可用空间高估，
+  // 翻上去后被导航压住；现在翻上去就是 rect.top - 22 - height，位置由锚点决定。
   const safeTop = vw <= 640 ? NAV_SAFE_TOP_NARROW : NAV_SAFE_TOP;
 
   const below = rect.bottom + POPOVER_GAP;
@@ -852,14 +864,18 @@ function computePopoverPosition(rect, size) {
   const spaceAbove = rect.top - POPOVER_GAP - safeTop;
 
   // 翻转规则：下方放得下就放下方（参考站默认 side=bottom）；
-  // 放不下且上方更宽裕就翻到上方；两边都不够时留在空间更大的那一侧，交给钳制贴边。
+  // 放不下且上方更宽裕就翻到上方；两边都不够时留在空间更大的那一侧。
+  // 两部分都用「相对锚点的绝对量」判断（不含 rect 自身位置），所以滚动不会让 side 抖动。
   let side = 'bottom';
   if (size.height > spaceBelow) {
     side = spaceAbove > spaceBelow ? 'top' : 'bottom';
   }
 
-  let top = side === 'bottom' ? below : above;
-  top = clampNum(top, safeTop, Math.max(safeTop, vh - POPOVER_MARGIN - size.height));
+  // 纵向：直接贴边，不做任何钳制。
+  // bottom → top = rect.bottom + 22；top → top = rect.top - 22 - height。
+  // 这样 top 只随 rect 平移，滚动多少浮层就移动多少（实测要求：差值 = 锚点移动量）。
+  // 允许底部/顶部超出视口被裁：看得见的位置由锚点决定，而不是由视口边界决定。
+  const top = side === 'bottom' ? below : above;
 
   // 水平：与锚点左边缘对齐，右侧出界时先尝试整体左移（仍保持 start 对齐语义），
   // 移不动再钳进视口。
@@ -867,7 +883,7 @@ function computePopoverPosition(rect, size) {
   const maxLeft = vw - POPOVER_MARGIN - size.width;
   left = clampNum(left, POPOVER_MARGIN, Math.max(POPOVER_MARGIN, maxLeft));
 
-  // align 只作视觉/调试标记：参考站是 start；钳制后如果和锚点左边缘差得明显，
+  // align 只作视觉/调试标记：参考站是 start；横向钳制后如果和锚点左边缘差得明显，
   // 标记成 center，便于日后排查「弹层为什么没对齐」。
   const align = Math.abs(left - rect.left) > 1 ? 'center' : 'start';
 
@@ -898,7 +914,9 @@ const prefersReducedMotion = () =>
  *     （否则「点同一个头像关闭」会被误判成「点在外部」再被 toggle 打开一次）。
  *   - document keydown：Esc 关闭；Tab 时把焦点收进弹层（见 trapFocus）。
  *   - window scroll（capture: true）：滚动容器是 .pictorial-page 而不是 window，
- *     只有 capture 才能收到它的 scroll；不监听的话卡片滚动后弹层会离开锚点。
+ *     只有 capture 才能收到它的 scroll；不监听的话卡片滚动后弹层会留在原地、
+ *     与锚点脱开（纵向已改成「跟锚点走」，所以这里必须每帧重算 top）。
+ *     passive: true —— 监听器不调 preventDefault，滚动不会被拖慢。
  *   - window resize：重新算法尺寸与位置（也覆盖手机旋转）。
  *
  * 全部用【同一个函数引用】removeEventListener —— 匿名函数移除不掉，
@@ -1337,7 +1355,8 @@ const onPopoverAnimEnd = (e) => {
 /**
  * 大图加载完 / 失败：
  *   - 加载完：图片真实长宽比可能与清单略有出入，重新定位一次（尺寸规则是
- *     「宽铺满、高按比例并钳制」，用清单比例已经够准，这里是最后一层保险）。
+ *     「宽铺满、高度按宽高比」由清单比例算出来已经够准，这里是最后一层保险；
+ *     重算位置时纵向依然贴锚点，不会因为高度变化而被钳回视口）。
  *   - 失败：不显示破图。记录一次并在弹层里给出降级文案 —— 但本项目 full/
  *     与 thumbnails/ 同一批生成，失败通常意味着部署漏了 public/images/full。
  */
