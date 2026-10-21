@@ -18,7 +18,7 @@
   <div class="site-bg" aria-hidden="true"></div>
   <div class="scanlines" aria-hidden="true"></div>
 
-  <main class="pictorial-page">
+  <main class="pictorial-page" ref="pageRef">
     <!--
       读屏用标题：参考站整个首屏就是卡片流本身，再叠一行大标题会破坏构图。
       但页面没有标题会让读屏用户失去定位，所以用 sr-only 提供，视觉上不可见。
@@ -196,6 +196,7 @@
       :style="popoverStyle"
       @mouseenter="onCardEnter"
       @mouseleave="onAvatarLeave(false)"
+      @wheel="onPopoverWheel"
       @click.stop
       @animationend="onPopoverAnimEnd"
     >
@@ -738,6 +739,7 @@ const viewerRef = ref(null);
 /** 打开大图前的焦点元素，关闭时还原，键盘用户不会丢失位置。 */
 /** 弹层 DOM 引用，定位时需要量它自己的尺寸。 */
 let viewerReturnFocus = null;
+const pageRef = ref(null);
 const popoverRef = ref(null);
 
 /**
@@ -1180,6 +1182,55 @@ function onAvatarEnter(e, card) {
 function onCardEnter() {
   if (hoverCloseTimer) { clearTimeout(hoverCloseTimer); hoverCloseTimer = 0; }
   if (hoverOpenTimer) { clearTimeout(hoverOpenTimer); hoverOpenTimer = 0; }
+}
+
+/**
+ * 把浮层上的滚轮转发给本页的滚动容器。
+ *
+ * 【为什么需要这一条】浮层用 Teleport 挂到了 body 下，而本页的滚动容器是
+ * .pictorial-page（html/body 被全局 main.css 钉成 overflow:hidden，
+ * 本页自己 height:100% + overflow-y:auto 当滚动容器）。
+ * 滚轮事件沿 DOM 祖先链冒泡，浮层的祖先只有 body -> html，
+ * 永远到不了 .pictorial-page —— 于是「鼠标停在浮层上滚轮完全没反应」。
+ *
+ * 参考站没有这个问题，是因为它整页就是 body 滚动（body 高 2717 > 视口）。
+ * 我们为了不改全局样式才用了内部滚动容器，代价就是浮层必须手动补这一跳。
+ *
+ * 【不抢浮层自己的滚动】若浮层内部出现可滚动区域，交给它自己。
+ *
+ * 【为什么不 preventDefault】这里刻意不加，三个理由：
+ *   1. 没声明 { passive:false } 时 wheel 默认被动，preventDefault() 既无效又会在控制台告警；
+ *   2. 根本不会双重滚动 —— html/body 被 main.css 钉成 overflow:hidden，body 链上没有可滚容器；
+ *      .pictorial-page 又有 overscroll-behavior-y:contain，滚到边界也不会外溢；
+ *   3. 加了反而会顺手压掉 ctrl+滚轮的页面缩放。
+ *      所以 ctrl/⌘ 手势改成「直接 return 让路」（见函数体第一行），而不是拦下来。
+ *
+ * 【为什么不做动量】CSSOM 平滑滚动无法跨元素组合 momentum，
+ * 手工派发 wheel 事件合成动量在跨浏览器下不可靠；而滚动位移本身是线性的，
+ * 手感与在页面其它地方滚动一致，没有做动量的必要。
+ */
+function onPopoverWheel(e) {
+  // 【修饰键手势必须让回浏览器】Ctrl/⌘ + 滚轮是缩放，不是滚动。
+  // 实测：按住 Ctrl 在浮层上滚 100，ctrlKey 为 true，但若照常转发页面就会滚 100，
+  // 缩放被我们的假滚动盖掉。这里直接 return，让事件继续走浏览器默认行为。
+  // 注意【不能】改成 preventDefault：那才会把缩放也一起吞掉。
+  if (e.ctrlKey || e.metaKey) return;
+  const page = pageRef.value;
+  // isConnected：若本页被销毁重建，pageRef 可能还指着已脱离文档的旧 <main>，
+  // 那种元素的 scrollHeight 恒为 0，会走到下面的判断里静默 return，滚轮彻底没反应。
+  if (!page || !page.isConnected) return;
+  // 浮层内部若有可滚动元素、且指针正停在它上面，优先让它自己滚。
+  // 【为什么用 composedPath 而不是 currentTarget】currentTarget 恒为浮层本身，
+  // 用了它就等于「只判断浮层自己」，子元素里的滚轮会被吞成页面位移；
+  // 手搓的 delta 不会触发子元素的原生滚动，子元素会纹丝不动。
+  for (const node of e.composedPath()) {
+    if (node === e.currentTarget) break;   // 走到浮层就停，不往 body 看
+    if (node && typeof node.scrollHeight === 'number'
+        && node.scrollHeight > node.clientHeight + 1) return;
+  }
+  if (page.scrollHeight <= page.clientHeight + 1) return;
+  page.scrollTop += e.deltaY;
+  page.scrollLeft += e.deltaX;
 }
 
 /**
