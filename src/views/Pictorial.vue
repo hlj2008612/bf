@@ -815,28 +815,70 @@ const popoverState = reactive({
   maxTop: 0,
 });
 
-/**
- * 渲染用样式。只负责「在什么位置」，视觉（背景/圆角/阴影/动画）全在 CSS 里 ——
- * 这样 reference 站给的那组数值只需要维护一份。
+/*
+ * 弹层定位的写法：优先用 CSS 独立属性 `translate`，老浏览器降级回 top/left。
+ *
+ * 【为什么要用 translate 而不是 top/left】
+ * 1. 性能：top/left 属于几何属性，写它触发 layout；`translate` 属于 transform 类，
+ *    只走合成（composite），滚动帧里每帧写一次也不会产生布局抖动。
+ * 2. 解耦（更关键）：入场动画 cardPopoverIn 占用的是 `transform`（translateY + scale）。
+ *    定位若也走 top/left，Vue patch style 时和动画的 transform 各管一摊还算相安，
+ *    但反过来只要定位属性被重写一次，就得靠 onUpdated 补丁把值抢回来。
+ *    改用 `translate` 后，定位与动画各占一个独立属性，天然互不覆盖。
+ *
+ * 注意 CSS `translate` 的语法是 `translate: <x> <y>`，即【先 left 后 top】，
+ * 与 top/left 的书写顺序相反，别写反了。
  */
+/** 能力检测结果缓存（null = 还没测过）。`CSS.supports` 每帧调会有点开销，只测一次。 */
+let translateSupported = null;
+
+function supportsCssTranslate() {
+  if (translateSupported === null) {
+    translateSupported =
+      typeof CSS !== 'undefined'
+      && typeof CSS.supports === 'function'
+      && CSS.supports('translate', '1px 1px');
+  }
+  return translateSupported;
+}
+
+/**
+ * 把 (top, left) 写进弹层 DOM —— 滚动跟随、打开、resize 校正全部走这里，
+ * 保证两条降级路径的写法只有一份，不会某处漏改。
+ */
+function applyPopoverPosition(el, top, left) {
+  if (supportsCssTranslate()) {
+    el.style.translate = `${left}px ${top}px`;
+  } else {
+    el.style.top = `${top}px`;
+    el.style.left = `${left}px`;
+  }
+}
+
 /*
  * 【关键保护】滚动跟随直接写 el.style 绕开了 Vue，但 Vue 一旦因别的原因
  * 重新 patch（比如 popoverAnim 切到 closing、activeCard 换卡），它会用
- * popoverStyle 里的 popoverState 值把 top/left 覆盖回去 —— 那是滚动前的旧值，
+ * popoverStyle 里的 popoverState 值把位置覆盖回去 —— 那是滚动前的旧值，
  * 弹层会瞬间跳位。所以在每次 patch 之后把我们的值重新写回去，消除失配。
+ *
+ * 用 translate 之后这里是「合成层属性写入」，比逐属性比对字符串再写 top/left 更廉价，
+ * 直接覆盖即可（降级路径下同一次调用只写两个属性，开销也一样可忽略）。
  */
 onUpdated(() => {
   if (!activeCard.value) return;
   const el = popoverRef.value;
-  if (!el) return;
-  if (el.style.top !== scrollAppliedTop + 'px') el.style.top = scrollAppliedTop + 'px';
-  if (el.style.left !== scrollAppliedLeft + 'px') el.style.left = scrollAppliedLeft + 'px';
+  if (el) applyPopoverPosition(el, scrollAppliedTop, scrollAppliedLeft);
 });
 
-const popoverStyle = computed(() => ({
-  top: popoverState.top + 'px',
-  left: popoverState.left + 'px',
-}));
+/**
+ * 渲染用样式。只负责「在什么位置」，视觉（背景/圆角/阴影/动画）全在 CSS 里 ——
+ * 这样 reference 站给的那组数值只需要维护一份。
+ */
+const popoverStyle = computed(() =>
+  supportsCssTranslate()
+    ? { translate: `${popoverState.left}px ${popoverState.top}px` }
+    : { top: popoverState.top + 'px', left: popoverState.left + 'px' },
+);
 
 /**
  * 锚点与弹层之间的间距（参考站实测 22px）。
@@ -1080,13 +1122,11 @@ function applyScrollShift() {
   const vwNow = typeof window === 'undefined' ? 1440 : window.innerWidth;
   if (vwNow <= 640) return;
   // 直接写 DOM，绕开 Vue 的响应式调度（见 scrollAppliedTop 的说明）。
-  if (nextTop !== scrollAppliedTop) {
+  // translate 路径下一次赋值同时带上两个分量，所以合并成一次写入即可。
+  if (nextTop !== scrollAppliedTop || nextLeft !== scrollAppliedLeft) {
     scrollAppliedTop = nextTop;
-    el.style.top = nextTop + 'px';
-  }
-  if (nextLeft !== scrollAppliedLeft) {
     scrollAppliedLeft = nextLeft;
-    el.style.left = nextLeft + 'px';
+    applyPopoverPosition(el, nextTop, nextLeft);
   }
 }
 
@@ -1100,9 +1140,7 @@ function syncPopoverDom() {
   scrollAppliedTop = popoverState.top;
   scrollAppliedLeft = popoverState.left;
   const el = popoverRef.value;
-  if (!el) return;
-  el.style.top = scrollAppliedTop + 'px';
-  el.style.left = scrollAppliedLeft + 'px';
+  if (el) applyPopoverPosition(el, scrollAppliedTop, scrollAppliedLeft);
 }
 
 /** 当前是否处于 reduced-motion：动画要按参考站原值放行，但位移/缩放要去掉。 */
@@ -2407,6 +2445,15 @@ columns.value = assignColumns(columnCount.value);
   /* 盒子模型：宽 320 是【含边框】的总宽，与脚本里的 POPOVER_PHOTO_WIDTH 一致 */
   box-sizing: border-box;
   position: fixed;
+  /*
+   * 【定位基准恒为 (0,0)，位移交给 JS 写 `translate`】
+   * 老写法是把 top/left 直接写成锚点坐标。改成 translate 后，元素固定钉在 (0,0)，
+   * 由 `translate: <left>px <top>px` 位移过去（见 applyPopoverPosition）。
+   * 不支持独立 translate 属性的老浏览器会降级回写 top/left，这两个 0 会被内联样式覆盖，
+   * 所以两条路径都不会错位。
+   */
+  top: 0;
+  left: 0;
   z-index: 2000;
   width: 320px;
   border-radius: 16px;
