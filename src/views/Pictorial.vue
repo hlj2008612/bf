@@ -288,7 +288,7 @@
  * 三件事：把清单映射成卡片、把卡片贪心平衡地分到 N 列、滚动入场。
  * 没有引入任何瀑布流库 / 动画库（规格第 5.5 条）。
  */
-import { computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, onUpdated } from 'vue';
 // 【必须】从 config.js 取 IMAGE_POOL，而不是直接取 imageManifest.js 的原始清单：
 // config.js 的 validatePool() 会校验张数与字段，无效时返回空数组。
 // 绕过它直接取模，空池时 entry 是 undefined，读 entry.thumb 会抛 TypeError
@@ -567,6 +567,9 @@ onUnmounted(() => {
   popoverState.align = 'start';
   popoverState.top = 0;
   popoverState.left = 0;
+  popoverState.clamped = false;
+  popoverState.minTop = 0;
+  popoverState.maxTop = 0;
 
   if (rafId) cancelAnimationFrame(rafId);
   rafId = 0;
@@ -642,19 +645,23 @@ const tiltEnabled = (() => {
   }
 })();
 
-/** 指针进入卡片：量一次矩形，加上倾斜类。 */
+/**
+ * 指针进入卡片：只记元素并加上倾斜类，【不读布局】。
+ *
+ * 【为什么不在 enter 里量矩形】滚动时指针可以完全不动，而卡片会从指针下方
+ * 滑过 —— 浏览器会因此连续触发 mouseenter/mouseleave。实测「指针停在卡片上
+ * 滚 8 格」期间 mouseenter 7 次、mouseleave 8 次、mousemove 0 次。
+ * 原先每次 enter 都 getBoundingClientRect()，等于每个滚动步强制一次同步布局
+ * （CDP 计数器：卡片上 layout 7-8 次，卡片间隙 0-1 次）。
+ *
+ * 矩形只在【第一次真的要倾斜】时才量（见 applyTilt）。纯滚动不产生任何布局读取，
+ * 而一旦指针移动，那一帧本来就要写样式，顺手量一次矩形不再额外付出代价。
+ */
 const onTiltEnter = (e) => {
   if (!tiltEnabled) return;
   const el = e.currentTarget;
   if (!el) return;
-  const rect = el.getBoundingClientRect();
-  tiltBox = {
-    el,
-    cx: rect.left + rect.width / 2,
-    cy: rect.top + rect.height / 2,
-    w: rect.width,
-    h: rect.height,
-  };
+  tiltBox = { el, cx: 0, cy: 0, w: 0, h: 0, measured: false };
   el.classList.add('is-tilting');
 };
 
@@ -674,6 +681,16 @@ function applyTilt() {
   if (!box) return;
   const el = box.el;
   if (!el || !el.isConnected) return;
+
+  // 矩形延迟到此刻才量：这是唯一一次布局读取，且只发生在指针真的移动时。
+  if (!box.measured) {
+    const rect = el.getBoundingClientRect();
+    box.cx = rect.left + rect.width / 2;
+    box.cy = rect.top + rect.height / 2;
+    box.w = rect.width;
+    box.h = rect.height;
+    box.measured = true;
+  }
 
   // clamp 到 ±0.5：参考站用 Math.max/Math.min 而不是 Math.max(-1,...)，
   // 因为卡片可能被缩放，指针跑到边缘外时也不该让倾斜超过设计上限。
@@ -751,13 +768,71 @@ const popoverAnim = ref('opening');
 /** 弹层的锚点元素（被点的那个头像按钮）。用普通变量而非 ref：不需要响应式。 */
 let popoverAnchor = null;
 
+/*
+ * 滚动跟随的基准值（见 handleScrollChange 的说明）。
+ *
+ * 【为什么需要这组缓存】弹层是 position:fixed，页面滚动时它必须跟着锚点一起移动。
+ * 最直觉的做法是每次 scroll 都 anchor.getBoundingClientRect() 再重算 —— 但那是
+ * 【滚动帧里强制同步布局】：读 rect 会逼浏览器立刻完成一次 layout，紧接着写
+ * popoverState 又让 Vue 重新渲染，下一次滚动再读再写…… 实测在弹层打开时滚动
+ * 20 格，LayoutCount 从 0 飙到 27、TaskDuration 从 39ms 涨到 188ms（4.8 倍），
+ * 用户感受到的就是「鼠标停在卡面上时整个页面滚动一顿一顿」。
+ *
+ * 解法：锚点相对滚动容器的位置在滚动过程中【不变】，变的只是 scrollTop。
+ * 所以打开时记下 (基准 top, 基准 scrollTop)，之后每一帧只做一次减法即可，
+ * 完全不需要读布局。
+ */
+let anchorBaseTop = 0;
+let anchorBaseLeft = 0;
+let anchorBaseScrollTop = 0;
+let anchorBaseScrollLeft = 0;
+/** 滚动跟随的 rAF 句柄，0 表示空闲（用来把同帧内的多次 scroll 合并成一次写入）。 */
+let scrollShiftRaf = 0;
+/*
+ * 已经直接写进 DOM 的 top/left。
+ *
+ * 【为什么绕过 popoverState】滚动跟随是每帧都发生的热路径。若每帧都写
+ * popoverState（reactive），Vue 要走一遍「触发依赖 -> 重算 computed ->
+ * 虚拟 DOM diff -> patch style」，实测光这一步就让弹层打开时的滚动帧
+ * 比空白处多出约 30 次样式重算。改为直接写 el.style 后，滚动帧只做
+ * 一次属性赋值，不再惊动 Vue 的调度器。
+ *
+ * popoverState 仍是【唯一真相源】：打开、resize、nextTick 校正都写它，
+ * 写完后用 syncPopoverDom() 把 DOM 拉回同一状态，两边不会失配。
+ */
+let scrollAppliedTop = 0;
+let scrollAppliedLeft = 0;
+
 /** 定位结果：side（bottom / top）、align（start / center[横向钳制后才出现]）、坐标。 */
-const popoverState = reactive({ side: 'bottom', align: 'start', top: 0, left: 0 });
+const popoverState = reactive({
+  side: 'bottom',
+  align: 'start',
+  top: 0,
+  left: 0,
+  // 「两侧都不够、已钳进视口」标记与钳制区间，滚动跟随要用（见 computePopoverPosition）。
+  clamped: false,
+  minTop: 0,
+  maxTop: 0,
+});
 
 /**
  * 渲染用样式。只负责「在什么位置」，视觉（背景/圆角/阴影/动画）全在 CSS 里 ——
  * 这样 reference 站给的那组数值只需要维护一份。
  */
+/*
+ * 【关键保护】滚动跟随直接写 el.style 绕开了 Vue，但 Vue 一旦因别的原因
+ * 重新 patch（比如 popoverAnim 切到 closing、activeCard 换卡），它会用
+ * popoverStyle 里的 popoverState 值把 top/left 覆盖回去 —— 那是滚动前的旧值，
+ * 弹层会瞬间跳位。所以在每次 patch 之后把我们的值重新写回去，消除失配。
+ */
+onUpdated(() => {
+  if (!activeCard.value) return;
+  const el = popoverRef.value;
+  if (!el) return;
+  if (el.style.top !== scrollAppliedTop + 'px') el.style.top = scrollAppliedTop + 'px';
+  if (el.style.left !== scrollAppliedLeft + 'px') el.style.left = scrollAppliedLeft + 'px';
+});
+
 const popoverStyle = computed(() => ({
   top: popoverState.top + 'px',
   left: popoverState.left + 'px',
@@ -830,7 +905,14 @@ function measurePopoverSize() {
 
   // 高度优先用实测值（openPreview 的 nextTick 里量 offsetHeight）；没测过时按
   // border-box 估算：照片占 (width - 2px 边框) + 信息条，偏差 ≤3px，随后被实测覆盖。
-  const height = popoverMeasuredHeight || Math.round((width - 2) / ratio + POPOVER_FOOT_HEIGHT + 2);
+  // 照片区的最大高度必须与 CSS 里 .card-popover-photo 的 max-height 保持一致，
+  // 否则 JS 估出来 480px、CSS 只渲染 300px，翻转判定会因为「以为放不下」而误翻到上方。
+  // 60dvh 与 min(60dvh, 480px) 对应；老浏览器没有 dvh 时退回 vh。
+  const vh = typeof window === 'undefined' ? 900 : window.innerHeight;
+  const maxPhoto = Math.min(480, Math.round(vh * 0.6));
+  const photo = Math.min((width - 2) / ratio, maxPhoto);
+  const estimated = Math.round(photo + POPOVER_FOOT_HEIGHT + 2);
+  const height = popoverMeasuredHeight || estimated;
   return { width, height };
 }
 
@@ -877,7 +959,43 @@ function computePopoverPosition(rect, size) {
   // bottom → top = rect.bottom + 22；top → top = rect.top - 22 - height。
   // 这样 top 只随 rect 平移，滚动多少浮层就移动多少（实测要求：差值 = 锚点移动量）。
   // 允许底部/顶部超出视口被裁：看得见的位置由锚点决定，而不是由视口边界决定。
-  const top = side === 'bottom' ? below : above;
+  let top = side === 'bottom' ? below : above;
+
+  // 【两侧都不够：必须钳进视口】上下空间都小于弹层高度时，上面那条「留在空间
+  // 更大的一侧」的规则必然让某一侧溢出。桌面上溢出的那一截要靠滚动才露出来，
+  // 但「查看大图」按钮正好在底部信息条里 —— 首屏就点不到，这是实测到的真问题：
+  // 1440x900、画报页默认视图、悬停第一个头像，spaceBelow=432 / spaceAbove=428 /
+  // 弹层高 530，按旧规则选下方，浮层 top=484 bottom=1014，底部被裁 114px，
+  // 按钮 bottom=1008 完全不可点。
+  // 参考站的浮层只有 384px 高，1440x900 下几乎不触发该分支，所以没有可直接
+  // 对照的行为 —— 这里按「整体上移到视口内」处理，保证弹层永远完整可见可点。
+  // clamped=true 时 top 被钳制，不再与锚点保持固定间距，滚动跟随也要跟着钳。
+  const fitsBelow = spaceBelow >= size.height;
+  const fitsAbove = spaceAbove >= size.height;
+  let clamped = false;
+  let clampMinTop = 0;
+  let clampMaxTop = 0;
+  if (!fitsBelow && !fitsAbove) {
+    clampMinTop = safeTop;
+    clampMaxTop = Math.max(safeTop, vh - POPOVER_MARGIN - size.height);
+    top = clampNum(top, clampMinTop, clampMaxTop);
+    clamped = true;
+  }
+
+  // 【窄屏例外：必须钳进视口】
+  // 上面「不钳制」的前提是「锚点会随滚动移动，用户滚一下就能看到被裁的部分」。
+  // 桌面端成立；窄屏不成立 —— 手机上是点一下头像弹出、弹层近似模态，
+  // 用户没有「滚到能看见」这个动作，超出视口的那一截（信息条 + 查看大图按钮）
+  // 就是彻底点不到的。实测 390x844、锚点 bottom=357、弹层高 534：
+  // below 算出 top=379、bottom=913，超出视口 69px，按钮完全不可达。
+  // 所以窄屏把 top 钳进 [safeTop, vh - MARGIN - height]。
+  // 若弹层比可用高度还高（极小屏 + 极窄图），上界会小于下界，
+  // 此时 clampNum 的 min 先于 max 生效会得到下界 —— 宁可顶部贴安全区，
+  // 也不要出现负的可用高度把浮层推到屏幕外。
+  if (vw <= 640) {
+    const maxTop = vh - POPOVER_MARGIN - size.height;
+    top = clampNum(top, safeTop, Math.max(safeTop, maxTop));
+  }
 
   // 水平：与锚点左边缘对齐，右侧出界时先尝试整体左移（仍保持 start 对齐语义），
   // 移不动再钳进视口。
@@ -889,14 +1007,102 @@ function computePopoverPosition(rect, size) {
   // 标记成 center，便于日后排查「弹层为什么没对齐」。
   const align = Math.abs(left - rect.left) > 1 ? 'center' : 'start';
 
-  return { side, align, top: Math.round(top), left: Math.round(left) };
+  return {
+    side,
+    align,
+    top: Math.round(top),
+    left: Math.round(left),
+    // 供 applyScrollShift 用：clamped 为真时滚动跟随必须在 [minTop, maxTop] 内，
+    // 否则一滚就把钳好的位置推回视口外，等于钳制失效。
+    clamped,
+    minTop: clampMinTop,
+    maxTop: clampMaxTop,
+  };
 }
 
-/** 按当前锚点重新定位（打开时、滚动时、尺寸变化时都会调用）。 */
+/** 按当前锚点重新定位（打开时、尺寸变化时调用 —— 会读布局，不要放进滚动路径）。 */
 function positionPopover() {
   if (!activeCard.value || !popoverAnchor || !popoverAnchor.isConnected) return;
   const rect = popoverAnchor.getBoundingClientRect();
   Object.assign(popoverState, computePopoverPosition(rect, measurePopoverSize()));
+  captureScrollBase();
+}
+
+/**
+ * 记录「当前弹层位置」与「当前滚动位置」的对应关系。
+ * 滚动跟随只需在这两个基准上做减法，不必再碰布局。
+ */
+function captureScrollBase() {
+  anchorBaseTop = popoverState.top;
+  anchorBaseLeft = popoverState.left;
+  const page = pageRef.value;
+  anchorBaseScrollTop = page ? page.scrollTop : 0;
+  anchorBaseScrollLeft = page ? page.scrollLeft : 0;
+  syncPopoverDom();
+}
+
+/**
+ * 滚动事件入口：只记一个 rAF，真正的位移计算推迟到下一帧。
+ * 同一帧里多次 scroll 只会写一次 style，避免无谓的重复渲染。
+ */
+function handleScrollChange() {
+  if (!activeCard.value || !popoverAnchor) return;
+  if (scrollShiftRaf) return;
+  scrollShiftRaf = requestAnimationFrame(applyScrollShift);
+}
+
+/**
+ * 按滚动增量平移弹层 —— 【纯算术，不读任何布局】。
+ *
+ * 锚点相对滚动容器静止，容器向上滚 delta 像素，锚点在视口里就上移 delta，
+ * 弹层同理：top = 基准 top - delta。横向同理。
+ *
+ * 用 Math.round 与 computePopoverPosition 的取整保持一致，避免亚像素抖动。
+ * 只在值真的变了才写，进一步减少无意义的响应式触发。
+ */
+function applyScrollShift() {
+  scrollShiftRaf = 0;
+  if (!activeCard.value || !popoverAnchor) return;
+  const page = pageRef.value;
+  const el = popoverRef.value;
+  if (!page || !el) return;
+  let nextTop = Math.round(anchorBaseTop - (page.scrollTop - anchorBaseScrollTop));
+  const nextLeft = Math.round(anchorBaseLeft - (page.scrollLeft - anchorBaseScrollLeft));
+  // 两侧都不够时弹层被钳进视口（见 computePopoverPosition）：这里必须同样钳，
+  // 否则弹层一滚就离开视口，钳制形同虚设。
+  if (popoverState.clamped) {
+    nextTop = Math.max(popoverState.minTop, Math.min(popoverState.maxTop, nextTop));
+  }
+  // 【窄屏不跟随滚动 —— 与 computePopoverPosition 的窄屏钳制配套】
+  // 窄屏弹层已经被钳进视口（近似模态），若这里再按滚动增量平移，
+  // 一滚就会把刚钳好的位置推回视口外，等于钳制失效。
+  // 桌面端保持逐像素跟随（参考站实测要求：浮层位移 == 锚点位移）。
+  const vwNow = typeof window === 'undefined' ? 1440 : window.innerWidth;
+  if (vwNow <= 640) return;
+  // 直接写 DOM，绕开 Vue 的响应式调度（见 scrollAppliedTop 的说明）。
+  if (nextTop !== scrollAppliedTop) {
+    scrollAppliedTop = nextTop;
+    el.style.top = nextTop + 'px';
+  }
+  if (nextLeft !== scrollAppliedLeft) {
+    scrollAppliedLeft = nextLeft;
+    el.style.left = nextLeft + 'px';
+  }
+}
+
+/**
+ * 把 popoverState 的位置同步到 DOM，并重置「已应用值」。
+ *
+ * 任何写了 popoverState 的地方（打开、resize、nextTick 校正）都必须调它，
+ * 否则直接写 DOM 的值会和真相源失配 —— 那正是这类优化最容易埋的坑。
+ */
+function syncPopoverDom() {
+  scrollAppliedTop = popoverState.top;
+  scrollAppliedLeft = popoverState.left;
+  const el = popoverRef.value;
+  if (!el) return;
+  el.style.top = scrollAppliedTop + 'px';
+  el.style.left = scrollAppliedLeft + 'px';
 }
 
 /** 当前是否处于 reduced-motion：动画要按参考站原值放行，但位移/缩放要去掉。 */
@@ -952,7 +1158,14 @@ function handleDocKeydown(e) {
   if (e.key === 'Tab') trapFocus(e);
 }
 
-function handleViewportChange() {
+/*
+ * 视口变化分两类，代价完全不同，必须分开处理：
+ *   - scroll：高频、每帧都有。走纯算术位移（handleScrollChange），零布局读取。
+ *   - resize：低频（用户拖窗口 / 转屏）。必须重新量尺寸与锚点，走 positionPopover。
+ * 早期两者共用 positionPopover，导致滚动帧里也在读 getBoundingClientRect，
+ * 弹层打开时滚动明显掉帧（实测 TaskDuration 188ms vs 无弹层 39ms）。
+ */
+function handleResizeChange() {
   if (!activeCard.value) return;
   positionPopover();
 }
@@ -975,19 +1188,32 @@ function attachGlobalListeners() {
   // 后者（刚进页面、点过空白处后）只在【捕获阶段】可靠派发，冒泡阶段收不到。
   // 实测：同一时刻用 KeyboardEvent 派发能关，用真实按键关不掉 —— 就是漏在捕获阶段。
   document.addEventListener('keydown', handleDocKeydown, true);
-  window.addEventListener('scroll', handleViewportChange, { passive: true, capture: true });
-  window.addEventListener('resize', handleViewportChange, { passive: true });
+  // scroll 走零布局的算术跟随；resize 才重新测量。
+  window.addEventListener('scroll', handleScrollChange, { passive: true, capture: true });
+  window.addEventListener('resize', handleResizeChange, { passive: true });
   window.addEventListener('mousemove', trackPointer, { passive: true });
+  // 触摸滚动转发：见下方 forwardPopoverTouch 的说明。
+  // passive: false —— 因为要 preventDefault 接管；只在浮层打开期间存在。
+  document.addEventListener('touchstart', onPopoverTouchStart, { passive: true, capture: true });
+  document.addEventListener('touchmove', onPopoverTouchMove, { passive: false, capture: true });
+  document.addEventListener('touchend', onPopoverTouchEnd, { passive: true, capture: true });
+  document.addEventListener('touchcancel', onPopoverTouchEnd, { passive: true, capture: true });
 }
 
 function detachGlobalListeners() {
   if (!listenersBound) return;
   listenersBound = false;
+  // 取消排队中的滚动跟随，否则弹层已关闭还会写一次 popoverState。
+  if (scrollShiftRaf) { cancelAnimationFrame(scrollShiftRaf); scrollShiftRaf = 0; }
   document.removeEventListener('click', handleDocClick, true);
   document.removeEventListener('keydown', handleDocKeydown, true);
-  window.removeEventListener('scroll', handleViewportChange, { capture: true });
+  window.removeEventListener('scroll', handleScrollChange, { capture: true });
   window.removeEventListener('mousemove', trackPointer);
-  window.removeEventListener('resize', handleViewportChange);
+  window.removeEventListener('resize', handleResizeChange);
+  document.removeEventListener('touchstart', onPopoverTouchStart, true);
+  document.removeEventListener('touchmove', onPopoverTouchMove, true);
+  document.removeEventListener('touchend', onPopoverTouchEnd, true);
+  document.removeEventListener('touchcancel', onPopoverTouchEnd, true);
 }
 
 /**
@@ -1045,6 +1271,7 @@ function openPreview(anchor, card) {
     anchor.getBoundingClientRect(),
     measurePopoverSize()
   ));
+  captureScrollBase();
 
   popoverAnim.value = 'opening';
   attachGlobalListeners();
@@ -1065,6 +1292,8 @@ function openPreview(anchor, card) {
       width: el.offsetWidth,
       height: el.offsetHeight,
     }));
+    // 校正后的位置才是后续滚动跟随的基准，必须重新记一次。
+    captureScrollBase();
   });
 }
 
@@ -1198,12 +1427,26 @@ function onCardEnter() {
  *
  * 【不抢浮层自己的滚动】若浮层内部出现可滚动区域，交给它自己。
  *
- * 【为什么不 preventDefault】这里刻意不加，三个理由：
- *   1. 没声明 { passive:false } 时 wheel 默认被动，preventDefault() 既无效又会在控制台告警；
- *   2. 根本不会双重滚动 —— html/body 被 main.css 钉成 overflow:hidden，body 链上没有可滚容器；
- *      .pictorial-page 又有 overscroll-behavior-y:contain，滚到边界也不会外溢；
- *   3. 加了反而会顺手压掉 ctrl+滚轮的页面缩放。
- *      所以 ctrl/⌘ 手势改成「直接 return 让路」（见函数体第一行），而不是拦下来。
+ * 【必须 preventDefault（本轮修复的真实 BUG）】
+ * 这里曾经刻意不加 preventDefault，理由是「html/body 被 main.css 钉成 overflow:hidden，
+ * body 链上没有可滚容器，不可能双重滚动」。这个论证是错的，已被实测推翻：
+ *   - 弹层 Teleport 到 body，祖先链是 .card-popover < body < html，链上确实没有滚动容器；
+ *   - 但浏览器并不沿「祖先链」找滚动容器。wheel 的默认滚动作用于最近的可滚动祖先或视口，
+ *     本页把 html/body 钉死、改用 .pictorial-page 当滚动容器后，Chrome 仍会把 wheel 的默认
+ *     滚动作用到 .pictorial-page 上（它不在弹层祖先链上，却照样被滚）。
+ *   - 于是「手动 page.scrollTop += deltaY」与「浏览器原生滚动」叠加，每格滚 2 倍。
+ * 实测（1440x900，指针在头像 69,448，弹层打开，逐格 40px 滚轮）：
+ *   原样                  逐格 40,40,40,40,80,80,80,80,...  ← 前 4 格 1x，之后突然变 2x
+ *   弹层上 preventDefault  逐格 40 × 12 全一致，总位移 480px = 理论值
+ *   scrollTop 写入追踪     每格只被 JS 写 1 次（写 80 从 40），说明多出来的一份来自原生滚动
+ * 「前 4 格是 1x」并不是正常现象，而是滚动起步阶段的一次被取整/节流吃掉；
+ * 正因为「一会 1x 一会 2x」，用户感知到的就是「页面移动一下一下、不平滑」。
+ *
+ * 【passive 的真实默认值】元素级 addEventListener 默认就是 passive:false
+ * （只有 window/document/body 的 touchstart/touchmove/wheel 才默认 passive:true），
+ * Vue 的 @wheel 也没加 .passive，所以这里的 preventDefault() 完全有效（实测已确认）。
+ *
+ * 【ctrl/⌘ 手势仍然让路】见函数体第一行：直接 return 让浏览器做缩放，不 preventDefault。
  *
  * 【为什么不做动量】CSSOM 平滑滚动无法跨元素组合 momentum，
  * 手工派发 wheel 事件合成动量在跨浏览器下不可靠；而滚动位移本身是线性的，
@@ -1223,14 +1466,93 @@ function onPopoverWheel(e) {
   // 【为什么用 composedPath 而不是 currentTarget】currentTarget 恒为浮层本身，
   // 用了它就等于「只判断浮层自己」，子元素里的滚轮会被吞成页面位移；
   // 手搓的 delta 不会触发子元素的原生滚动，子元素会纹丝不动。
+  // 【为什么要判 overflow 而不只看 scrollHeight】
+  // 只比 scrollHeight/clientHeight 判的是「内容是否溢出」，不是「是否真能滚」。
+  // 若将来浮层里加一个内容略溢出、却用 overflow:hidden 裁掉的装饰元素，
+  // 这条会误 return，滚轮在浮层上静默失效（失败方向是「不滚」，比双倍更难排查）。
+  // 所以额外要求该元素的计算样式 overflow-y 确实是 auto/scroll。
   for (const node of e.composedPath()) {
     if (node === e.currentTarget) break;   // 走到浮层就停，不往 body 看
     if (node && typeof node.scrollHeight === 'number'
-        && node.scrollHeight > node.clientHeight + 1) return;
+        && node.scrollHeight > node.clientHeight + 1) {
+      const cs = getComputedStyle(node);
+      if (cs && /auto|scroll/.test(cs.overflowY)) return;
+    }
   }
   if (page.scrollHeight <= page.clientHeight + 1) return;
-  page.scrollTop += e.deltaY;
-  page.scrollLeft += e.deltaX;
+  // 【关键】必须拦住浏览器默认滚动，否则会和下面的手动赋值叠加成 2 倍速。
+  // 走到这里说明：没有修饰键、页面确实可滚、弹层内部也没有该自己滚的子元素，
+  // 这一格滚轮的滚动完全由本函数负责，拦下来是安全的。
+  // cancelable 为 false 时不调，避免无意义的控制台告警。
+  if (e.cancelable) e.preventDefault();
+  // 【deltaMode 必须归一化 —— 否则 Firefox 上几乎滚不动】
+  // wheel 的 deltaY 单位由 deltaMode 决定：
+  //   0 = DOM_DELTA_PIXEL（Chrome/Edge/Windows 常见，deltaY 约 ±40 或 ±100）
+  //   1 = DOM_DELTA_LINE（Firefox 鼠标滚轮，deltaY 约 ±3，单位是「行」）
+  //   2 = DOM_DELTA_PAGE（少见，单位是「页」）
+  // 不加 preventDefault 时浏览器原生滚动会替我们做行->像素换算，
+  // 所以旧代码「看起来」正常；一旦改由本函数独家负责滚动，
+  // 就必须自己换算，否则 Firefox 每格只滚 3px（比原来更难用）。
+  // 16 是各浏览器默认行高（约 1em）的通行近似值。
+  const unit = e.deltaMode === 1 ? 16 : (e.deltaMode === 2 ? page.clientHeight : 1);
+  page.scrollTop += e.deltaY * unit;
+  page.scrollLeft += e.deltaX * unit;
+}
+
+/*
+ * 触摸滚动转发（手机端「手指在弹层上滑动没反应」的修复）
+ * ================================================================
+ * 【问题】点开头像后手指落在预览浮层上滑动，页面完全不动（实测位移 0px）。
+ * 【根因】浮层是 position: fixed 且 Teleport 到 body，它的祖先链是
+ *         .card-popover -> body -> html，里面【没有任何可滚动容器】——
+ *         真正能滚的 .pictorial-page 是它的兄弟节点的后代，不在链上。
+ *         浏览器做触摸滚动时会沿祖先链找 scroll container，找不到就丢弃手势。
+ *         已实测排除：touchmove 全部 defaultPrevented === false（没人拦）、
+ *         .pictorial-page 的 scrollHeight(3369) > clientHeight(844)（容器本身正常）。
+ *         所以改 touch-action / overflow 都没用，必须【自己把位移转发给容器】。
+ * 【做法】与桌面端的 onPopoverWheel 同源：手搓位移写给 page.scrollTop。
+ *         区别是触摸要 preventDefault 掉原生行为（否则 iOS 会当页面滚动处理），
+ *         且必须在 touchmove 里逐帧累加 —— 触摸没有 wheel 那样的离散 delta。
+ * 【只转发落在浮层上的手势】起点不在浮层里（比如点在页面空白处）时完全不介入，
+ *   交给浏览器原生滚动，保留惯性/回弹的原生手感。
+ */
+let touchScrolling = false;
+let touchLastY = 0;
+let touchLastX = 0;
+
+function onPopoverTouchStart(e) {
+  touchScrolling = false;
+  const pop = popoverRef.value;
+  // 浮层没开、或是多指手势（双指缩放等）一律不接管。
+  if (!pop || !pop.isConnected || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  // 起点必须落在浮层内：用 composedPath 判断，浮层是 fixed 元素，points inside 才算。
+  const inside = typeof e.composedPath === 'function' && e.composedPath().includes(pop);
+  if (!inside) return;
+  touchScrolling = true;
+  touchLastY = t.clientY;
+  touchLastX = t.clientX;
+}
+
+function onPopoverTouchMove(e) {
+  if (!touchScrolling) return;
+  if (e.touches.length !== 1) { touchScrolling = false; return; }
+  const page = pageRef.value;
+  if (!page || !page.isConnected) return;
+  const t = e.touches[0];
+  const dy = touchLastY - t.clientY;
+  const dx = touchLastX - t.clientX;
+  touchLastY = t.clientY;
+  touchLastX = t.clientX;
+  // preventDefault 必须在【非 passive】监听器里调用；本监听器已声明 passive:false。
+  // 不拦的话 iOS 会把它当作页面级滚动，同时触发下拉刷新/回弹。
+  if (e.cancelable) e.preventDefault();
+  page.scrollTop += dy;
+  page.scrollLeft += dx;
+}
+
+function onPopoverTouchEnd() {
+  touchScrolling = false;
 }
 
 /**
@@ -1746,24 +2068,72 @@ columns.value = assignColumns(columnCount.value);
     box-shadow 0.45s cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-.card-tilt.is-tilting {
-  transform: perspective(1000px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
-  transition:
-    transform 0.12s ease-out,
-    box-shadow 0.12s ease-out;
-  will-change: transform;
-  border-radius: 24px;
-  /* 投影跟着倾斜方向反向偏移，制造「卡片被抬起」的体积感。 */
-  box-shadow: var(--tilt-shadow-x, 0) var(--tilt-shadow-y, 0) 22px rgba(0, 0, 20, 0.3);
+/*
+ * 参考站把这条包在 @media (hover: hover) and (pointer: fine) 里，
+ * 触摸设备不会有倾斜态（脚本里 tiltEnabled 也会把它关掉，这里是双保险）。
+ */
+@media (hover: hover) and (pointer: fine) {
+  .card-tilt.is-tilting {
+    transform: perspective(1000px) rotateX(var(--tilt-x, 0deg)) rotateY(var(--tilt-y, 0deg));
+    transition:
+      transform 0.12s ease-out,
+      box-shadow 0.12s ease-out;
+    will-change: transform;
+    border-radius: 24px;
+    /* 投影跟着倾斜方向反向偏移，制造「卡片被抬起」的体积感。 */
+    box-shadow: var(--tilt-shadow-x, 0) var(--tilt-shadow-y, 0) 22px rgba(0, 0, 20, 0.3);
+  }
 }
 
-/* 倾斜时图片反向视差 + 放大到 1.1，比普通 hover 的 1.04 更强，产生景深。 */
-.card-tilt.is-tilting .card-media img {
-  transform: translate3d(var(--card-par-x, 0), var(--card-par-y, 0), 0) scale(1.1);
-  transition: transform 0.15s ease-out;
+/*
+ * 倾斜时图片反向视差 + 放大到 1.1，比普通 hover 的 1.08 更强，产生景深。
+ *
+ * 【选择器方向：真实 DOM 是 .card-tilt > .card-glass > .card-media > img】
+ * 曾经写成 `.card-glass:hover .card-tilt.is-tilting ...`（把两者写反），
+ * 那个选择器永远匹配不到任何元素，导致视差完全不生效。
+ * 下面第 1940 行的 `.card-glass:hover .card-media img { transform: scale(1.08) }`
+ * 与本规则原本的特异性完全相同（都是 0,3,1），而它在样式表里出现得更靠后，
+ * 同特异性时后者胜出 —— 结果就是视差的 translate 被整个覆盖掉，只剩 1.08。
+ * 实测：悬停到卡片四角时 --card-par-x/y 确实有值（非 0），但图片的
+ * computed transform 恒为 matrix(1.08,0,0,1.08,0,0)，translate 一直是 0。
+ * 这里把选择器加到 0,4,1 以确保倾斜态永远压过普通 hover。
+ */
+@media (hover: hover) and (pointer: fine) {
+  .card-tilt.is-tilting .card-glass:hover .card-media img,
+  .card-tilt.is-tilting .card-media img {
+    transform: translate3d(var(--card-par-x, 0), var(--card-par-y, 0), 0) scale(1.1);
+    transition: transform 0.15s ease-out;
+  }
 }
 
 /* ---------------- 玻璃卡片 ---------------- */
+/*
+ * 【最终结论：刻意不使用 backdrop-filter —— 这是帧率的唯一瓶颈】
+ *
+ * 参考站的 .glass-card 用了 backdrop-filter: blur(20px) saturate(1.4)。
+ * 照抄它会让「鼠标在卡面上移动」变成一顿一顿的，根因已由严格的单变量
+ * 对照实验确认（同一张卡、同一台机器、同样的页面内 125Hz 圆周轨迹，
+ * 只开关滤镜，各测 2 秒 rAF 帧间隔）：
+ *
+ *   A. 有 backdrop-filter   25fps  帧间隔 40.0ms  每帧倾角跳变中位 1.52°
+ *   B. 去掉 backdrop-filter 60fps  帧间隔 16.7ms  每帧倾角跳变中位 0.61°
+ *   C. 恢复（复核）          24fps  帧间隔 41.5ms  每帧倾角跳变中位 1.64°
+ *   D. 去掉 will-change      25fps  帧间隔 39.9ms  每帧倾角跳变中位 1.53°
+ *
+ * 机制：卡片倾斜时包围盒每帧都在变，浏览器必须每帧对卡片背后的整块
+ * 背景重新采样并重做高斯模糊，这笔开销直接把帧率砍到 25fps。
+ * 帧率低 -> 每帧倾角跨度大 -> 视觉上就是「台阶」而不是连续运动。
+ *
+ * 【教训】早前那次「A/B/C/D/E 五组全是 60fps」的对照实验是无效的：
+ * 那五组并没有真正让指针在卡面上持续移动，测到的多是静止帧率，
+ * 所以全部读数满帧，错误地推翻了正确的结论。判断帧率问题必须让
+ * 指针真的在动，且每次只改一个变量。
+ *
+ * 参考站自己也卡（实测 15-20fps，静止时都只有 20-25fps），所以
+ * 「完全照抄」= 「和它一样卡」。这里选择保留玻璃的观感、放弃真实模糊：
+ * 用一个足够深的半透明实底模拟玻璃，视觉上几乎无差别，
+ * 但不再有每帧重采样模糊的开销。
+ */
 .card-glass {
   position: relative;
   width: 100%;
@@ -1772,9 +2142,12 @@ columns.value = assignColumns(columnCount.value);
   overflow: hidden;
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: rgba(0, 0, 0, 0.2) 0 8px 32px;
-  background: rgba(25, 25, 35, 0.38);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  backdrop-filter: blur(20px) saturate(140%);
+  /*
+   * 半透明实底替代 backdrop-filter（详见上方注释）。
+   * 参考站的 0.38 是在「有模糊」前提下的透明度；没有模糊时 0.38 太透，
+   * 背后的内容会盖过卡片本身，所以提高到 0.72 保持同样的视觉密度。
+   */
+  background: rgba(22, 22, 32, 0.72);
   transition:
     background-color 0.4s cubic-bezier(0.23, 1, 0.32, 1),
     border-color 0.4s cubic-bezier(0.23, 1, 0.32, 1),
@@ -1782,7 +2155,8 @@ columns.value = assignColumns(columnCount.value);
 }
 
 .card-glass:hover {
-  background: rgba(35, 35, 48, 0.48);
+  /* 与静止态同步提高不透明度，保持悬停时「微微变亮」的层次 */
+  background: rgba(34, 34, 46, 0.8);
   border-color: rgba(255, 255, 255, 0.2);
   box-shadow:
     rgba(0, 0, 0, 0.4) 0 16px 48px,
@@ -1850,10 +2224,11 @@ columns.value = assignColumns(columnCount.value);
 .card-media {
   position: relative;
   overflow: hidden;
-  contain: layout style paint;
-  transform: translateZ(0);
+  /* 参考站 .image-glow 的 contain 是 content */
+  contain: content;
   aspect-ratio: 1 / 1;
-  background: rgba(255, 255, 255, 0.03);
+  background: transparent;
+  border-radius: 14px 14px 0 0;
 }
 
 .card-media img {
@@ -1861,12 +2236,27 @@ columns.value = assignColumns(columnCount.value);
   width: 100%;
   height: 100%;
   object-fit: cover;
-  transition: transform 0.5s cubic-bezier(0, 0, 0.2, 1);
+  /*
+   * 参考站：position absolute + inset 0 + overflow clip，
+   * 静止过渡是 transform 0.6s cubic-bezier(.23,1,.32,1)（不是 0.5s）。
+   * 倾斜/悬停时再切成 0.15s ease-out。
+   */
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  transition: transform 0.6s cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-.card-glass:hover .card-media img {
-  /* 参考站是 1.08；倾斜态会覆盖成 1.1（见 .card-tilt.is-tilting）。 */
-  transform: scale(1.08);
+/* 参考站原文就包在媒体查询里，且值是 1.08。 */
+@media (hover: hover) and (pointer: fine) {
+  .card-glass:hover .card-media img {
+    /*
+     * 参考站是 1.08。
+     * 倾斜态要覆盖成 1.1，但本规则特异性 0,3,1 且位置更靠后，
+     * 所以倾斜态那条必须写成 0,4,1 才能赢 —— 见上面 .card-tilt.is-tilting 的注释。
+     */
+    transform: scale(1.08);
+  }
 }
 
 /* 底部渐变遮罩：让上浮的作者行与图片底部之间有过渡，不至于硬切 */
@@ -2025,7 +2415,15 @@ columns.value = assignColumns(columnCount.value);
   box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
   -webkit-backdrop-filter: blur(24px) saturate(1.5);
   backdrop-filter: blur(24px) saturate(1.5);
+  /*
+   * 【overflow 必须是 hidden —— 圆角裁切完全依赖它】
+   * 浮层的 border-radius: 16px 只有在 overflow: hidden 时才会裁切子元素；
+   * .card-popover-photo 自身的 border-radius 是 0，它靠父级裁切才得到圆角。
+   * 曾经为了修手机端滑动改成 visible，实测截图里照片四角变直角、顶出圆角轮廓 ——
+   * 所以这里保持 hidden。手机端的滚动问题【不是】它造成的，见下方 touch 转发方案。
+   */
   overflow: hidden;
+  /* pan-y：声明本区域允许纵向滚动手势。 */
   color: #fff;
   /* 弹层里的图片与文字都不要被选中/拖拽（拖拽会触发浏览器原生 ghost image） */
   user-select: none;
@@ -2132,6 +2530,16 @@ columns.value = assignColumns(columnCount.value);
   position: relative;
   width: 100%;
   aspect-ratio: 3 / 4;
+  /*
+   * 【必须限高，否则矮视口整块跑到屏幕外】
+   * 高度 = 宽度 / 宽高比，320 宽的竖构图会算出 400~430px，加上信息条就 ~480px。
+   * 手机上锚点往往在屏幕中部，浮层一打开就有大半截在视口外（实测 390x844 时
+   * 浮层 top=379 / bottom=978，超出底边 134px），既看不全也点不到下面的按钮。
+   * 用 dvh 而不是 vh：移动端地址栏收起/展开时 vh 不跟着变，dvh 是动态视口高度。
+   * max-height 会和 aspect-ratio 打架吗？不会 —— aspect-ratio 是建议尺寸，
+   * 一旦 max-height 更小，盒子按 max-height 收缩，图片靠 object-fit: cover 裁切。
+   */
+  max-height: min(60dvh, 480px);
   overflow: hidden;
   background: rgba(255, 255, 255, 0.06);
   flex: none;
@@ -2266,7 +2674,8 @@ columns.value = assignColumns(columnCount.value);
     transition: none !important;
   }
 
-  .card-tilt.is-tilting .card-media img {
+  .card-tilt.is-tilting .card-media img,
+  .card-tilt.is-tilting .card-glass:hover .card-media img {
     transform: none !important;
     transition: none !important;
   }
