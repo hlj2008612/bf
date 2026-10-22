@@ -60,7 +60,18 @@
               @mouseleave="onTiltLeave"
             >
               <article class="card-glass">
-                <div class="card-media">
+                <!--
+                  【高度随照片自适应】aspect-ratio 用这张图的真实宽高比（manifest 的 w/h，
+                  与 full 图等比），媒体区高度 = 列宽 / 比例，于是竖图卡高、横图卡矮，
+                  和源站的 tall-template / wide-template 一样。
+                  之前写死 1:1，23 张卡全被压成同一高度、横图被 cover 裁掉上下。
+                -->
+                <div
+                  class="card-media"
+                  :style="card.w && card.h
+                    ? { aspectRatio: `${card.w} / ${card.h}` }
+                    : undefined"
+                >
                   <img
                     :src="card.src"
                     alt="写真"
@@ -570,6 +581,7 @@ onUnmounted(() => {
   popoverState.clamped = false;
   popoverState.minTop = 0;
   popoverState.maxTop = 0;
+  popoverState.cardWidth = 0;
 
   if (rafId) cancelAnimationFrame(rafId);
   rafId = 0;
@@ -813,6 +825,8 @@ const popoverState = reactive({
   clamped: false,
   minTop: 0,
   maxTop: 0,
+  // 当前卡片的布局宽度（px）。浮层与它等宽，0 = 还没测（退回 POPOVER_PHOTO_WIDTH）。
+  cardWidth: 0,
 });
 
 /*
@@ -871,14 +885,28 @@ onUpdated(() => {
 });
 
 /**
- * 渲染用样式。只负责「在什么位置」，视觉（背景/圆角/阴影/动画）全在 CSS 里 ——
+ * 浮层宽度：桌面端与卡片等宽（参考站是固定 288，本项目按需求改成跟随卡片），
+ * 窄屏用 `calc(100vw - 24px)`（两列卡片太窄，浮层跟着缩就没法看了）。
+ * 量不到卡片时退回 POPOVER_PHOTO_WIDTH。
+ */
+const popoverWidth = computed(() => {
+  if (typeof window === 'undefined') return `${POPOVER_PHOTO_WIDTH}px`;
+  if (window.innerWidth <= 640) return `calc(100vw - ${POPOVER_MARGIN * 2}px)`;
+  return popoverState.cardWidth > 0
+    ? `${popoverState.cardWidth}px`
+    : `${POPOVER_PHOTO_WIDTH}px`;
+});
+
+/**
+ * 渲染用样式。只负责「在什么位置 / 多宽」，视觉（背景/圆角/阴影/动画）全在 CSS 里 ——
  * 这样 reference 站给的那组数值只需要维护一份。
  */
-const popoverStyle = computed(() =>
-  supportsCssTranslate()
+const popoverStyle = computed(() => ({
+  width: popoverWidth.value,
+  ...(supportsCssTranslate()
     ? { translate: `${popoverState.left}px ${popoverState.top}px` }
-    : { top: popoverState.top + 'px', left: popoverState.left + 'px' },
-);
+    : { top: popoverState.top + 'px', left: popoverState.left + 'px' }),
+}));
 
 /**
  * 锚点与弹层之间的间距（参考站实测 22px）。
@@ -901,8 +929,8 @@ const NAV_SAFE_TOP_NARROW = 88;
 const POPOVER_FALLBACK_VW = 320;
 
 /**
- * 悬停预览的照片显示宽度（px）。与 CSS 里 .card-popover 的 width 必须一致，
- * 否则 measurePopoverSize() 算出的宽度和实际渲染宽度对不上，横向定位会偏。
+ * 浮层宽度的兜底值（px）。正常情况浮层宽度 = 当前卡片宽度，只有量不到卡片时
+ * （锚点已被卸载、极端窄屏）才退回这个固定值。
  */
 const POPOVER_PHOTO_WIDTH = 320;
 /**
@@ -936,9 +964,23 @@ let popoverMeasuredHeight = 0;
 function measurePopoverSize() {
   const vw = typeof window === 'undefined' ? 1440 : window.innerWidth;
   const vwOk = vw > 0 ? vw : POPOVER_FALLBACK_VW;
-  // 与 CSS 里 @media (max-width:640px) 的 width: calc(100vw - 24px) 用同一公式。
-  // Math.max(0, ...)：视口极窄时别算出负数宽度，否则定位会翻到屏幕外。
-  const width = Math.max(0, Math.min(POPOVER_PHOTO_WIDTH, vwOk - POPOVER_MARGIN * 2));
+
+  /*
+   * 【宽度跟随卡片】参考站实测（1440x900）：卡片 262~276 宽、悬停浮层固定 288，
+   * 浮层比卡片宽一截。本项目按需求改成「浮层与卡片等宽」，视觉上像从卡片里展开。
+   * 卡片宽度由瀑布流列宽决定，逐张可能不同，所以每次打开都实测一次。
+   *
+   * 窄屏（<=640px）例外：两列卡片只有一百多像素，浮层跟着变窄的话照片几乎看不见，
+   * 所以这里沿用 `calc(100vw - 24px)` 的同一公式（见 .card-popover 的媒体查询）。
+   */
+  let width;
+  if (vwOk <= 640) {
+    width = Math.max(0, vwOk - POPOVER_MARGIN * 2);
+  } else if (popoverState.cardWidth > 0) {
+    width = popoverState.cardWidth;
+  } else {
+    width = POPOVER_PHOTO_WIDTH;
+  }
 
   const card = activeCard.value;
   // 宽高比缺失或非法时退回 3:4（项目图片都是竖构图，比 1:1 更接近真实高度），
@@ -1062,10 +1104,25 @@ function computePopoverPosition(rect, size) {
   };
 }
 
+/**
+ * 取当前卡片的布局宽度 —— 浮层要与它等宽。
+ *
+ * 用 offsetWidth 而不是 getBoundingClientRect().width：卡片 hover 时带
+ * `translateY(-10px) scale(1.05)`（见 .card-glass:hover），rect 会把缩放算进去，
+ * 量出来比真实列宽大 5%，浮层就会比卡片宽一圈。offsetWidth 是布局宽度，不吃 transform。
+ */
+function currentCardWidth() {
+  if (!popoverAnchor) return 0;
+  const cardEl = popoverAnchor.closest('.card-glass');
+  return cardEl ? cardEl.offsetWidth : 0;
+}
+
 /** 按当前锚点重新定位（打开时、尺寸变化时调用 —— 会读布局，不要放进滚动路径）。 */
 function positionPopover() {
   if (!activeCard.value || !popoverAnchor || !popoverAnchor.isConnected) return;
   const rect = popoverAnchor.getBoundingClientRect();
+  // 先记卡片宽度，measurePopoverSize() 要拿它算浮层宽高。
+  popoverState.cardWidth = currentCardWidth();
   Object.assign(popoverState, computePopoverPosition(rect, measurePopoverSize()));
   captureScrollBase();
 }
@@ -1302,6 +1359,9 @@ function openPreview(anchor, card) {
   // 顺序：先关掉上一张（动画会走 closing，但新弹层直接替换 ref），再设置新锚点。
   activeCard.value = card;
   popoverAnchor = anchor;
+  // 先记卡片宽度，measurePopoverSize() 要拿它算浮层宽高（与 positionPopover 同一口径）。
+  // openPreview 不走 positionPopover，所以这里必须自己取一次。
+  popoverState.cardWidth = currentCardWidth();
 
   // 尺寸/位置必须在弹层【渲染前】算好并写进 style，
   // 否则会先以 top:0/left:0 出现在左上角再跳位（一帧可见的错位）。
@@ -2264,6 +2324,11 @@ columns.value = assignColumns(columnCount.value);
   overflow: hidden;
   /* 参考站 .image-glow 的 contain 是 content */
   contain: content;
+  /*
+   * aspect-ratio 只是兜底默认值 —— 模板里按每张图的真实宽高比写了内联
+   * `aspect-ratio: w / h`（见 card-media 的 :style），卡片高度因此随照片变化。
+   * 只有在拿不到 w/h 时才会落到这个 1:1。
+   */
   aspect-ratio: 1 / 1;
   background: transparent;
   border-radius: 14px 14px 0 0;
@@ -2442,7 +2507,7 @@ columns.value = assignColumns(columnCount.value);
    所以这段 scoped 样式对 body 下的弹层同样生效，不需要全局样式。
    ================================================================ */
 .card-popover {
-  /* 盒子模型：宽 320 是【含边框】的总宽，与脚本里的 POPOVER_PHOTO_WIDTH 一致 */
+  /* 盒子模型：宽度是【含边框】的总宽，与 JS 里 popoverWidth 写出的值同一口径 */
   box-sizing: border-box;
   position: fixed;
   /*
@@ -2455,6 +2520,11 @@ columns.value = assignColumns(columnCount.value);
   top: 0;
   left: 0;
   z-index: 2000;
+  /*
+   * 【宽度由 JS 写内联，这里的 320 只是首帧兜底】
+   * 桌面端浮层与卡片等宽（见 popoverWidth），所以 CSS 不写死；
+   * 留着 320 是为了「内联样式还没写上前」那一帧不至于宽度为 0。
+   */
   width: 320px;
   border-radius: 16px;
   background: rgba(20, 20, 28, 0.55);
