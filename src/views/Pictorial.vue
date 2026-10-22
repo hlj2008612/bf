@@ -885,13 +885,16 @@ onUpdated(() => {
 });
 
 /**
- * 浮层宽度：桌面端与卡片等宽（参考站是固定 288，本项目按需求改成跟随卡片），
- * 窄屏用 `calc(100vw - 24px)`（两列卡片太窄，浮层跟着缩就没法看了）。
- * 量不到卡片时退回 POPOVER_PHOTO_WIDTH。
+ * 浮层宽度：与卡片等宽（不分桌面/窄屏，规则统一）。
+ *
+ * 源站实测：桌面浮层固定 288、卡片 262~276（浮层更宽）；窄屏（390/375）源站**不弹浮层**
+ * —— 移动端没有 hover，只有点击，所以没有可对照的窄屏规格。本项目按需求统一成
+ * 「浮层 = 卡片宽度」，桌面窄屏一致。
+ *
+ * 卡片宽度由瀑布流列宽决定，逐张可能不同，所以每次打开都实测（见 currentCardWidth）。
  */
 const popoverWidth = computed(() => {
   if (typeof window === 'undefined') return `${POPOVER_PHOTO_WIDTH}px`;
-  if (window.innerWidth <= 640) return `calc(100vw - ${POPOVER_MARGIN * 2}px)`;
   return popoverState.cardWidth > 0
     ? `${popoverState.cardWidth}px`
     : `${POPOVER_PHOTO_WIDTH}px`;
@@ -967,16 +970,12 @@ function measurePopoverSize() {
 
   /*
    * 【宽度跟随卡片】参考站实测（1440x900）：卡片 262~276 宽、悬停浮层固定 288，
-   * 浮层比卡片宽一截。本项目按需求改成「浮层与卡片等宽」，视觉上像从卡片里展开。
+   * 浮层比卡片宽一截。本项目按需求改成「浮层与卡片等宽」，桌面与窄屏规则统一
+   * （源站窄屏不弹浮层，没有可对照的规格）。
    * 卡片宽度由瀑布流列宽决定，逐张可能不同，所以每次打开都实测一次。
-   *
-   * 窄屏（<=640px）例外：两列卡片只有一百多像素，浮层跟着变窄的话照片几乎看不见，
-   * 所以这里沿用 `calc(100vw - 24px)` 的同一公式（见 .card-popover 的媒体查询）。
    */
   let width;
-  if (vwOk <= 640) {
-    width = Math.max(0, vwOk - POPOVER_MARGIN * 2);
-  } else if (popoverState.cardWidth > 0) {
+  if (popoverState.cardWidth > 0) {
     width = popoverState.cardWidth;
   } else {
     width = POPOVER_PHOTO_WIDTH;
