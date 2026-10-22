@@ -41,7 +41,7 @@
 ## 快速事实
 
 - 技术栈：Vue 3.4 + vue-router 4.3（hash 模式）+ Vite 8.3，无 UI 框架、无 GSAP
-- 线上：<https://zmq-hlj.ccwu.cc/>（源 = `gh-pages` 分支）
+- 线上：<https://mqz.ccwu.cc/>（源 = `gh-pages` 分支）
 - 开发分支：`main`
 - 登录：`zmq` / `2008823`（客户端硬编码，非真鉴权）
 - 版本：`package.json` = 2.2.0

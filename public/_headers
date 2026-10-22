@@ -1,7 +1,7 @@
 # ================================================================
 #  public/_headers —— Netlify / Cloudflare Pages 语法的缓存与安全策略
 #  ----------------------------------------------------------------
-#  ⚠️ 真实部署目标是 GitHub Pages（见 public/CNAME: zmq-hlj.ccwu.cc），
+#  ⚠️ 真实部署目标是 GitHub Pages（见 public/CNAME: mqz.ccwu.cc），
 #     而 GitHub Pages **完全忽略 _headers 文件**。因此本文件在该部署下
 #     不会生效，它的价值是：一旦迁到 Netlify / Cloudflare Pages / Vercel，
 #     无需改动即可获得正确的缓存策略。

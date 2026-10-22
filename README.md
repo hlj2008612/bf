@@ -2,7 +2,7 @@
 
 Vue 3 + Vite 重构版照片墙。用无限画布把 20 张照片铺满整面墙，支持惯性拖拽与沉浸式浏览。
 
-线上地址：<https://zmq-hlj.ccwu.cc/>
+线上地址：<https://mqz.ccwu.cc/>
 
 ## 技术栈
 
@@ -18,7 +18,7 @@ Vue 3 + Vite 重构版照片墙。用无限画布把 20 张照片铺满整面墙
 index.html              入口 HTML（含 SEO / 社交 meta 与防白屏内联底色）
 vite.config.js          构建配置 + 体积报告插件
 public/
-  CNAME                 自定义域名 zmq-hlj.ccwu.cc
+  CNAME                 自定义域名 mqz.ccwu.cc
   favicon.svg
   icons.svg
   _headers              Netlify / Cloudflare Pages 缓存与安全策略（GitHub Pages 忽略）
@@ -63,7 +63,7 @@ npm run build
 VITE_BASE=/photo-wall-vue/ npm run build
 ```
 
-GitHub Pages 的**项目页**（`https://<user>.github.io/<repo>/`）需要传子路径；本仓库用的是**自定义域名** `zmq-hlj.ccwu.cc`（`public/CNAME`），站点挂在根路径，所以保持默认 `/` 即可。
+GitHub Pages 的**项目页**（`https://<user>.github.io/<repo>/`）需要传子路径；本仓库用的是**自定义域名** `mqz.ccwu.cc`（`public/CNAME`），站点挂在根路径，所以保持默认 `/` 即可。
 
 ### 部署
 
