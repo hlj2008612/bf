@@ -2701,6 +2701,12 @@ columns.value = assignColumns(columnCount.value);
 }
 
 .card-popover-hint {
+  /*
+   * 【窄屏隐藏提示文字】浮层与卡片等宽后，窄屏两列卡片只有 ~170px，
+   * 这行「点击查看大图 · 移开自动关闭」会把右侧按钮挤到 16px 宽、基本点不到。
+   * 窄屏直接把这行收起来，按钮拿回全部宽度；桌面空间足够，保留原样。
+   * 用 visibility 而不是 display:none，保持 flex 子项数量不变，避免布局重算差异。
+   */
   min-width: 0;
   font-size: 12px;
   line-height: 16px;
@@ -2708,6 +2714,17 @@ columns.value = assignColumns(columnCount.value);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/*
+ * 窄屏收起提示文字（理由见上）。用 max-width:0 + 隐藏而不是 display:none ——
+ * 后者会让 flex 少一个子项，按钮的 flex:1 分配基数变化，宽度会比「文字让位」更多，
+ * 视觉上会突然顶到两边。保持子项在、只是不占位，过渡更稳。
+ */
+@media (max-width: 640px) {
+  .card-popover-hint {
+    display: none;
+  }
 }
 
 .card-popover-btn {
